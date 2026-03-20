@@ -35,6 +35,18 @@ To use a different HTTP port:
 python3 server.py --enable-http --http-port 9001
 ```
 
+The status page also shows a green, yellow, or red indicator based on heartbeat age. By default:
+
+- green: heartbeat age up to `5000` ms
+- yellow: heartbeat age up to `10000` ms
+- red: heartbeat age above `10000` ms
+
+To configure those thresholds:
+
+```bash
+python3 server.py --enable-http --healthy-threshold-ms 3000 --warning-threshold-ms 7000
+```
+
 ## Run a client
 
 ```bash
