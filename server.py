@@ -78,9 +78,19 @@ class HeartbeatServer:
                 timestamp = datetime.now(timezone.utc)
 
                 with self.lock:
+                    existing_client = self.clients.get(client_id)
+                    max_gap_ms = 0
+                    if existing_client is not None:
+                        gap_ms = self.get_interval_ms(
+                            existing_client["last_heartbeat"],
+                            timestamp,
+                        )
+                        max_gap_ms = max(existing_client["max_gap_ms"], gap_ms)
+
                     self.clients[client_id] = {
                         "address": peer,
                         "last_heartbeat": timestamp,
+                        "max_gap_ms": max_gap_ms,
                     }
                     self.print_clients_locked()
 
@@ -90,7 +100,11 @@ class HeartbeatServer:
         print("\nKnown clients:")
         for client_id in sorted(self.clients):
             client = self.clients[client_id]
-            print(f"- {client_id} ({client['address']}) last heartbeat: {self.format_timestamp(client['last_heartbeat'])}")
+            print(
+                f"- {client_id} ({client['address']}) last heartbeat: "
+                f"{self.format_timestamp(client['last_heartbeat'])}, "
+                f"max heartbeat gap: {client['max_gap_ms']} ms"
+            )
         print()
 
     def start_http_server(self) -> None:
@@ -129,6 +143,7 @@ class HeartbeatServer:
         for client in clients:
             age_ms = self.get_heartbeat_age_ms(client["last_heartbeat"])
             status = self.get_client_status(age_ms)
+            max_gap_ms = max(client["max_gap_ms"], age_ms)
             rows.append(
                 "<tr>"
                 f"<td><span class=\"status-dot {status['css_class']}\"></span>{escape(status['label'])}</td>"
@@ -136,11 +151,12 @@ class HeartbeatServer:
                 f"<td>{escape(client['address'])}</td>"
                 f"<td>{escape(self.format_timestamp(client['last_heartbeat']))}</td>"
                 f"<td>{age_ms} ms</td>"
+                f"<td>{max_gap_ms} ms</td>"
                 "</tr>"
             )
 
         if not rows:
-            rows.append('<tr><td colspan="5">No heartbeats received yet.</td></tr>')
+            rows.append('<tr><td colspan="6">No heartbeats received yet.</td></tr>')
 
         table_rows = "\n".join(rows)
 
@@ -174,6 +190,7 @@ class HeartbeatServer:
         <th>Address</th>
         <th>Last Heartbeat</th>
         <th>Age</th>
+        <th>Max Gap</th>
       </tr>
     </thead>
     <tbody>
@@ -191,14 +208,19 @@ class HeartbeatServer:
                     "client_id": client_id,
                     "address": client["address"],
                     "last_heartbeat": client["last_heartbeat"],
+                    "max_gap_ms": client["max_gap_ms"],
                 }
                 for client_id, client in sorted(self.clients.items())
             ]
 
     @staticmethod
-    def get_heartbeat_age_ms(timestamp: datetime) -> int:
-        delta = datetime.now(timezone.utc) - timestamp
+    def get_interval_ms(start: datetime, end: datetime) -> int:
+        delta = end - start
         return int(delta.total_seconds() * 1000)
+
+    @classmethod
+    def get_heartbeat_age_ms(cls, timestamp: datetime) -> int:
+        return cls.get_interval_ms(timestamp, datetime.now(timezone.utc))
 
     def get_client_status(self, age_ms: int) -> dict[str, str]:
         if age_ms <= self.healthy_threshold_ms:
