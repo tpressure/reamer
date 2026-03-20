@@ -123,6 +123,16 @@ class HeartbeatServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def do_POST(self) -> None:
+                if self.path != "/reset":
+                    self.send_error(404, "Not Found")
+                    return
+
+                server.clear_clients()
+                self.send_response(303)
+                self.send_header("Location", "/")
+                self.end_headers()
+
             def log_message(self, format: str, *args: object) -> None:
                 return
 
@@ -145,8 +155,8 @@ class HeartbeatServer:
             status = self.get_client_status(age_ms)
             max_gap_ms = max(client["max_gap_ms"], age_ms)
             rows.append(
-                "<tr>"
-                f"<td><span class=\"status-dot {status['css_class']}\"></span>{escape(status['label'])}</td>"
+                f"<tr class=\"{status['css_class']}\">"
+                f"<td>{escape(status['label'])}</td>"
                 f"<td>{escape(client['client_id'])}</td>"
                 f"<td>{escape(client['address'])}</td>"
                 f"<td>{escape(self.format_timestamp(client['last_heartbeat']))}</td>"
@@ -169,18 +179,25 @@ class HeartbeatServer:
   <meta http-equiv="refresh" content="1">
   <style>
     body {{ font-family: sans-serif; margin: 2rem; }}
+    .page-header {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }}
     table {{ border-collapse: collapse; width: 100%; max-width: 56rem; }}
     th, td {{ border: 1px solid #ccc; padding: 0.75rem; text-align: left; }}
     th {{ background: #f3f3f3; }}
-    .status-dot {{ display: inline-block; width: 0.85rem; height: 0.85rem; border-radius: 50%; margin-right: 0.5rem; vertical-align: middle; }}
-    .status-healthy {{ background: #2f9e44; }}
-    .status-warning {{ background: #f08c00; }}
-    .status-stale {{ background: #e03131; }}
+    tr.status-healthy td {{ background: #d3f9d8; }}
+    tr.status-warning td {{ background: #fff3bf; }}
+    tr.status-stale td {{ background: #ffe3e3; }}
     .thresholds {{ margin-bottom: 1rem; color: #444; }}
+    .reset-button {{ background: #c92a2a; border: none; border-radius: 0.35rem; color: #fff; cursor: pointer; font: inherit; padding: 0.7rem 1rem; }}
+    .reset-button:hover {{ background: #a61e1e; }}
   </style>
 </head>
 <body>
-  <h1>Heartbeat Status</h1>
+  <div class="page-header">
+    <h1>Heartbeat Status</h1>
+    <form method="post" action="/reset">
+      <button type="submit" class="reset-button">Reset Clients</button>
+    </form>
+  </div>
   <p class="thresholds">{escape(threshold_summary)}</p>
   <table>
     <thead>
@@ -212,6 +229,11 @@ class HeartbeatServer:
                 }
                 for client_id, client in sorted(self.clients.items())
             ]
+
+    def clear_clients(self) -> None:
+        with self.lock:
+            self.clients.clear()
+        print("Cleared all clients via HTTP reset.")
 
     @staticmethod
     def get_interval_ms(start: datetime, end: datetime) -> int:
