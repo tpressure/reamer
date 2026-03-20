@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 
 DEFAULT_PORT = 12345
 DEFAULT_HTTP_PORT = 8080
+DEFAULT_HEALTHY_THRESHOLD_MS = 5000
+DEFAULT_WARNING_THRESHOLD_MS = 10000
 
 
 class HeartbeatServer:
@@ -19,11 +21,15 @@ class HeartbeatServer:
         port: int,
         enable_http: bool = False,
         http_port: int = DEFAULT_HTTP_PORT,
+        healthy_threshold_ms: int = DEFAULT_HEALTHY_THRESHOLD_MS,
+        warning_threshold_ms: int = DEFAULT_WARNING_THRESHOLD_MS,
     ) -> None:
         self.host = host
         self.port = port
         self.enable_http = enable_http
         self.http_port = http_port
+        self.healthy_threshold_ms = healthy_threshold_ms
+        self.warning_threshold_ms = warning_threshold_ms
         self.clients = {}
         self.lock = threading.Lock()
 
@@ -113,19 +119,28 @@ class HeartbeatServer:
 
     def render_status_page(self) -> str:
         clients = self.get_clients_snapshot()
+        threshold_summary = (
+            f"Green: <= {self.healthy_threshold_ms} ms, "
+            f"Yellow: <= {self.warning_threshold_ms} ms, "
+            f"Red: > {self.warning_threshold_ms} ms"
+        )
 
         rows = []
         for client in clients:
+            age_ms = self.get_heartbeat_age_ms(client["last_heartbeat"])
+            status = self.get_client_status(age_ms)
             rows.append(
                 "<tr>"
+                f"<td><span class=\"status-dot {status['css_class']}\"></span>{escape(status['label'])}</td>"
                 f"<td>{escape(client['client_id'])}</td>"
                 f"<td>{escape(client['address'])}</td>"
                 f"<td>{escape(self.format_timestamp(client['last_heartbeat']))}</td>"
+                f"<td>{age_ms} ms</td>"
                 "</tr>"
             )
 
         if not rows:
-            rows.append('<tr><td colspan="3">No heartbeats received yet.</td></tr>')
+            rows.append('<tr><td colspan="5">No heartbeats received yet.</td></tr>')
 
         table_rows = "\n".join(rows)
 
@@ -135,21 +150,30 @@ class HeartbeatServer:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Heartbeat Status</title>
+  <meta http-equiv="refresh" content="1">
   <style>
     body {{ font-family: sans-serif; margin: 2rem; }}
     table {{ border-collapse: collapse; width: 100%; max-width: 56rem; }}
     th, td {{ border: 1px solid #ccc; padding: 0.75rem; text-align: left; }}
     th {{ background: #f3f3f3; }}
+    .status-dot {{ display: inline-block; width: 0.85rem; height: 0.85rem; border-radius: 50%; margin-right: 0.5rem; vertical-align: middle; }}
+    .status-healthy {{ background: #2f9e44; }}
+    .status-warning {{ background: #f08c00; }}
+    .status-stale {{ background: #e03131; }}
+    .thresholds {{ margin-bottom: 1rem; color: #444; }}
   </style>
 </head>
 <body>
   <h1>Heartbeat Status</h1>
+  <p class="thresholds">{escape(threshold_summary)}</p>
   <table>
     <thead>
       <tr>
+        <th>Status</th>
         <th>Client ID</th>
         <th>Address</th>
         <th>Last Heartbeat</th>
+        <th>Age</th>
       </tr>
     </thead>
     <tbody>
@@ -172,6 +196,18 @@ class HeartbeatServer:
             ]
 
     @staticmethod
+    def get_heartbeat_age_ms(timestamp: datetime) -> int:
+        delta = datetime.now(timezone.utc) - timestamp
+        return int(delta.total_seconds() * 1000)
+
+    def get_client_status(self, age_ms: int) -> dict[str, str]:
+        if age_ms <= self.healthy_threshold_ms:
+            return {"label": "Healthy", "css_class": "status-healthy"}
+        if age_ms <= self.warning_threshold_ms:
+            return {"label": "Warning", "css_class": "status-warning"}
+        return {"label": "Stale", "css_class": "status-stale"}
+
+    @staticmethod
     def format_timestamp(timestamp: datetime) -> str:
         return timestamp.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
@@ -191,16 +227,37 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_HTTP_PORT,
         help="Port for the optional HTTP status server",
     )
+    parser.add_argument(
+        "--healthy-threshold-ms",
+        type=int,
+        default=DEFAULT_HEALTHY_THRESHOLD_MS,
+        help="Maximum heartbeat age in milliseconds for a green status",
+    )
+    parser.add_argument(
+        "--warning-threshold-ms",
+        type=int,
+        default=DEFAULT_WARNING_THRESHOLD_MS,
+        help="Maximum heartbeat age in milliseconds for a yellow status",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.healthy_threshold_ms < 0 or args.warning_threshold_ms < 0:
+        raise SystemExit("Heartbeat thresholds must be non-negative.")
+    if args.warning_threshold_ms < args.healthy_threshold_ms:
+        raise SystemExit(
+            "--warning-threshold-ms must be greater than or equal to --healthy-threshold-ms."
+        )
+
     server = HeartbeatServer(
         args.host,
         args.port,
         enable_http=args.enable_http,
         http_port=args.http_port,
+        healthy_threshold_ms=args.healthy_threshold_ms,
+        warning_threshold_ms=args.warning_threshold_ms,
     )
     try:
         server.serve_forever()
