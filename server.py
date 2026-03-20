@@ -157,6 +157,7 @@ class HeartbeatServer:
             ordered_clients.append((self.get_status_priority(status["css_class"]), client, age_ms, status))
 
         ordered_clients.sort(key=lambda item: (item[0], item[1]["client_id"]))
+        summary_status_class = self.get_summary_status_class(ordered_clients)
 
         rows = []
         for _, client, age_ms, status in ordered_clients:
@@ -190,10 +191,13 @@ class HeartbeatServer:
     table {{ border-collapse: collapse; width: 100%; max-width: 56rem; }}
     th, td {{ border: 1px solid #ccc; padding: 0.75rem; text-align: left; }}
     th {{ background: #f3f3f3; }}
+    .summary-box {{ border: 2px solid #333; border-radius: 0.6rem; display: inline-block; font-size: 1.2rem; font-weight: 700; margin-bottom: 0.75rem; padding: 0.85rem 1.15rem; }}
+    .summary-box.status-healthy {{ background: #b2f2bb; }}
+    .summary-box.status-warning {{ background: #ffec99; }}
+    .summary-box.status-stale {{ background: #ffc9c9; }}
     tr.status-healthy td {{ background: #d3f9d8; }}
     tr.status-warning td {{ background: #fff3bf; }}
     tr.status-stale td {{ background: #ffe3e3; }}
-    .summary {{ font-weight: 600; margin-bottom: 0.5rem; }}
     .thresholds {{ margin-bottom: 1rem; color: #444; }}
     .reset-button {{ background: #c92a2a; border: none; border-radius: 0.35rem; color: #fff; cursor: pointer; font: inherit; padding: 0.7rem 1rem; }}
     .reset-button:hover {{ background: #a61e1e; }}
@@ -206,7 +210,7 @@ class HeartbeatServer:
       <button type="submit" class="reset-button">Reset Clients</button>
     </form>
   </div>
-  <p class="summary">Total Clients: {total_clients}</p>
+  <div class="summary-box {summary_status_class}">Total Clients: {total_clients}</div>
   <p class="thresholds">{escape(threshold_summary)}</p>
   <table>
     <thead>
@@ -268,6 +272,11 @@ class HeartbeatServer:
             "status-healthy": 2,
         }
         return priorities.get(css_class, 99)
+
+    def get_summary_status_class(self, ordered_clients: list[tuple[int, dict[str, object], int, dict[str, str]]]) -> str:
+        if not ordered_clients:
+            return "status-healthy"
+        return ordered_clients[0][3]["css_class"]
 
     @staticmethod
     def format_timestamp(timestamp: datetime) -> str:
