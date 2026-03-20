@@ -186,21 +186,39 @@ class HeartbeatServer:
   <title>Heartbeat Status</title>
   <meta http-equiv="refresh" content="1">
   <style>
-    body {{ font-family: sans-serif; margin: 2rem; }}
+    :root {{
+      color-scheme: dark;
+      --bg: #14181d;
+      --panel: #1c2229;
+      --panel-strong: #242c35;
+      --border: #37414d;
+      --text: #edf2f7;
+      --muted: #a7b1bd;
+      --healthy-bg: #1f4d35;
+      --healthy-summary: #2b6b48;
+      --warning-bg: #5a4316;
+      --warning-summary: #7a5b1f;
+      --stale-bg: #5c2830;
+      --stale-summary: #7d3741;
+      --danger: #c75a63;
+      --danger-hover: #a94851;
+    }}
+    body {{ background: var(--bg); color: var(--text); font-family: sans-serif; margin: 2rem; }}
+    h1 {{ margin: 0; }}
     .page-header {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }}
-    table {{ border-collapse: collapse; width: 100%; max-width: 56rem; }}
-    th, td {{ border: 1px solid #ccc; padding: 0.75rem; text-align: left; }}
-    th {{ background: #f3f3f3; }}
-    .summary-box {{ border: 2px solid #333; border-radius: 0.6rem; display: inline-block; font-size: 1.2rem; font-weight: 700; margin-bottom: 0.75rem; padding: 0.85rem 1.15rem; }}
-    .summary-box.status-healthy {{ background: #b2f2bb; }}
-    .summary-box.status-warning {{ background: #ffec99; }}
-    .summary-box.status-stale {{ background: #ffc9c9; }}
-    tr.status-healthy td {{ background: #d3f9d8; }}
-    tr.status-warning td {{ background: #fff3bf; }}
-    tr.status-stale td {{ background: #ffe3e3; }}
-    .thresholds {{ margin-bottom: 1rem; color: #444; }}
-    .reset-button {{ background: #c92a2a; border: none; border-radius: 0.35rem; color: #fff; cursor: pointer; font: inherit; padding: 0.7rem 1rem; }}
-    .reset-button:hover {{ background: #a61e1e; }}
+    table {{ background: var(--panel); border-collapse: collapse; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22); width: 100%; max-width: 56rem; }}
+    th, td {{ border: 1px solid var(--border); padding: 0.75rem; text-align: left; }}
+    th {{ background: var(--panel-strong); }}
+    .summary-box {{ border: 1px solid var(--border); border-radius: 0.6rem; box-shadow: inset 0 1px 0 rgba(255,255,255,0.03); display: inline-block; font-size: 1.35rem; font-weight: 700; margin-bottom: 0.75rem; padding: 0.95rem 1.25rem; }}
+    .summary-box.status-healthy {{ background: var(--healthy-summary); }}
+    .summary-box.status-warning {{ background: var(--warning-summary); }}
+    .summary-box.status-stale {{ background: var(--stale-summary); }}
+    tr.status-healthy td {{ background: var(--healthy-bg); }}
+    tr.status-warning td {{ background: var(--warning-bg); }}
+    tr.status-stale td {{ background: var(--stale-bg); }}
+    .thresholds {{ margin-bottom: 1rem; color: var(--muted); }}
+    .reset-button {{ background: var(--danger); border: 1px solid transparent; border-radius: 0.35rem; color: #fff; cursor: pointer; font: inherit; padding: 0.7rem 1rem; }}
+    .reset-button:hover {{ background: var(--danger-hover); }}
   </style>
 </head>
 <body>
