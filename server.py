@@ -149,10 +149,16 @@ class HeartbeatServer:
             f"Red: > {self.warning_threshold_ms} ms"
         )
 
-        rows = []
+        ordered_clients = []
         for client in clients:
             age_ms = self.get_heartbeat_age_ms(client["last_heartbeat"])
             status = self.get_client_status(age_ms)
+            ordered_clients.append((self.get_status_priority(status["css_class"]), client, age_ms, status))
+
+        ordered_clients.sort(key=lambda item: (item[0], item[1]["client_id"]))
+
+        rows = []
+        for _, client, age_ms, status in ordered_clients:
             max_gap_ms = max(client["max_gap_ms"], age_ms)
             rows.append(
                 f"<tr class=\"{status['css_class']}\">"
@@ -250,6 +256,15 @@ class HeartbeatServer:
         if age_ms <= self.warning_threshold_ms:
             return {"label": "Warning", "css_class": "status-warning"}
         return {"label": "Stale", "css_class": "status-stale"}
+
+    @staticmethod
+    def get_status_priority(css_class: str) -> int:
+        priorities = {
+            "status-stale": 0,
+            "status-warning": 1,
+            "status-healthy": 2,
+        }
+        return priorities.get(css_class, 99)
 
     @staticmethod
     def format_timestamp(timestamp: datetime) -> str:
