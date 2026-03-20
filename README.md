@@ -60,3 +60,45 @@ Example with explicit settings:
 ```bash
 python3 client.py --host 127.0.0.1 --port 12345 --client-id client-a --interval 2
 ```
+
+## Nix Flake
+
+This repo also exposes two raw NixOS images through flakes:
+
+- `server.raw`: runs the heartbeat server automatically
+- `client.raw`: runs the heartbeat client automatically
+
+Build them with:
+
+```bash
+nix build .#server.raw
+nix build .#client.raw
+```
+
+The resulting raw images are available at:
+
+```bash
+./result
+```
+
+### Server image defaults
+
+The server VM starts the TCP server on port `12345` and enables the HTTP status page on port `2222` by default.
+
+### Client image defaults
+
+The client VM starts automatically and connects to the server host name `testvm` on port `12345` by default.
+
+### Configuring the VM images
+
+The flake defines NixOS options for both images:
+
+- `services.heartbeatDemoServer.tcpPort`
+- `services.heartbeatDemoServer.httpPort`
+- `services.heartbeatDemoServer.healthyThresholdMs`
+- `services.heartbeatDemoServer.warningThresholdMs`
+- `services.heartbeatDemoClient.serverHost`
+- `services.heartbeatDemoClient.serverPort`
+- `services.heartbeatDemoClient.intervalSeconds`
+
+To customize an image, extend the corresponding module in `flake.nix`.
