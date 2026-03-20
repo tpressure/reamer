@@ -14,6 +14,9 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
       serverDnsName = "testvm";
+      numClientVms = 2;
+      lib = pkgs.lib;
+      clientNodeNames = builtins.genList (i: "client${toString (i + 1)}") numClientVms;
 
       heartbeatDemo = pkgs.stdenvNoCC.mkDerivation {
         pname = "heartbeat-demo";
@@ -32,7 +35,7 @@
         '';
       };
 
-      commonModule = { lib, ... }: {
+      commonModule = { ... }: {
         networking.useDHCP = lib.mkDefault true;
         security.sudo.wheelNeedsPassword = false;
         services.openssh.enable = lib.mkDefault true;
@@ -170,65 +173,62 @@
       integrationTest = (import "${pkgs.path}/nixos/tests/make-test-python.nix" ({ ... }: {
         name = "heartbeat-demo-integration";
 
-        nodes = {
-          testvm = { ... }: {
-            imports = [ commonModule serverModule ];
+        nodes =
+          {
+            testvm = { ... }: {
+              imports = [ commonModule serverModule ];
 
-            system.name = "server";
-            networking.hostName = serverDnsName;
-            services.heartbeatDemoServer.enable = true;
+              system.name = "server";
+              networking.hostName = serverDnsName;
+              services.heartbeatDemoServer.enable = true;
 
-            virtualisation.forwardPorts = [
-              {
-                from = "host";
-                host.port = 4444;
-                guest.port = 2222;
-              }
-            ];
-          };
+              virtualisation.forwardPorts = [
+                {
+                  from = "host";
+                  host.port = 4444;
+                  guest.port = 2222;
+                }
+              ];
+            };
+          }
+          // lib.genAttrs clientNodeNames (
+            clientName: { ... }: {
+              imports = [ commonModule clientModule ];
 
-          client1 = { ... }: {
-            imports = [ commonModule clientModule ];
+              system.name = clientName;
+              networking.hostName = clientName;
+              services.heartbeatDemoClient.enable = true;
+              services.heartbeatDemoClient.serverHost = serverDnsName;
+            }
+          );
 
-            system.name = "client1";
-            networking.hostName = "client1";
-            services.heartbeatDemoClient.enable = true;
-            services.heartbeatDemoClient.serverHost = serverDnsName;
-          };
+        testScript =
+          ''
+            start_all()
 
-          client2 = { ... }: {
-            imports = [ commonModule clientModule ];
+            server.wait_for_unit("heartbeat-demo-server.service")
+            server.wait_for_open_port(12345)
+            server.wait_for_open_port(2222)
+          ''
+          + lib.concatMapStringsSep "\n" (clientName: ''
+            ${clientName}.wait_for_unit("heartbeat-demo-client.service")
+          '') clientNodeNames
+          + "\n"
+          + lib.concatMapStringsSep "\n" (clientName: ''
+            ${clientName}.wait_until_succeeds("getent hosts ${serverDnsName}")
+          '') clientNodeNames
+          + ''
 
-            system.name = "client2";
-            networking.hostName = "client2";
-            services.heartbeatDemoClient.enable = true;
-            services.heartbeatDemoClient.serverHost = serverDnsName;
-          };
-        };
-
-        testScript = ''
-          start_all()
-
-          server.wait_for_unit("heartbeat-demo-server.service")
-          server.wait_for_open_port(12345)
-          server.wait_for_open_port(2222)
-
-          client1.wait_for_unit("heartbeat-demo-client.service")
-          client2.wait_for_unit("heartbeat-demo-client.service")
-
-          client1.wait_until_succeeds("getent hosts ${serverDnsName}")
-          client2.wait_until_succeeds("getent hosts ${serverDnsName}")
-
-          server.wait_until_succeeds(
-              "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'Total Clients: 2'"
-          )
-          server.wait_until_succeeds(
-              "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'client1'"
-          )
-          server.wait_until_succeeds(
-              "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'client2'"
-          )
-        '';
+            server.wait_until_succeeds(
+                "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'Total Clients: ${toString numClientVms}'"
+            )
+          ''
+          + "\n"
+          + lib.concatMapStringsSep "\n" (clientName: ''
+            server.wait_until_succeeds(
+                "curl --fail --silent http://127.0.0.1:2222/ | grep -q '${clientName}'"
+            )
+          '') clientNodeNames;
       })) {
         inherit system pkgs;
       };

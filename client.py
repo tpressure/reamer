@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 12345
 DEFAULT_INTERVAL = 5.0
+DEFAULT_RETRY_DELAY = 2.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,24 +27,38 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_INTERVAL,
         help="Seconds between heartbeat messages",
     )
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=DEFAULT_RETRY_DELAY,
+        help="Seconds to wait before retrying after a connection failure",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    with socket.create_connection((args.host, args.port)) as sock:
-        print(f"Connected to {args.host}:{args.port} as {args.client_id}")
+    while True:
+        try:
+            with socket.create_connection((args.host, args.port)) as sock:
+                print(f"Connected to {args.host}:{args.port} as {args.client_id}")
 
-        while True:
-            payload = {
-                "type": "heartbeat",
-                "client_id": args.client_id,
-                "sent_at": datetime.now(timezone.utc).isoformat(),
-            }
-            sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-            print(f"Heartbeat sent at {payload['sent_at']}")
-            time.sleep(args.interval)
+                while True:
+                    payload = {
+                        "type": "heartbeat",
+                        "client_id": args.client_id,
+                        "sent_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+                    print(f"Heartbeat sent at {payload['sent_at']}")
+                    time.sleep(args.interval)
+        except OSError as exc:
+            print(
+                f"Connection to {args.host}:{args.port} failed: {exc}. "
+                f"Retrying in {args.retry_delay} seconds."
+            )
+            time.sleep(args.retry_delay)
 
 
 if __name__ == "__main__":

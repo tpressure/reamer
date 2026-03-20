@@ -98,6 +98,12 @@ serverDnsName = "testvm";
 
 The default client image and the integration test both use that value, so changing it there updates both together.
 
+There is also a single place to change how many client VMs the integration test starts:
+
+```nix
+numClientVms = 2;
+```
+
 ### Configuring the VM images
 
 The flake defines NixOS options for both images:
@@ -149,8 +155,7 @@ For example, to build a client image that points at a cloud DNS name, import the
 The flake also defines a 3-node NixOS integration test:
 
 - `testvm`: runs the server VM, with hostname taken from `serverDnsName`
-- `client1`: runs the client
-- `client2`: runs the client
+- `client1` ... `clientN`: runs the clients, with the count taken from `numClientVms`
 
 Run the test as a standard flake check with:
 
