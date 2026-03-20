@@ -15,6 +15,7 @@
       pkgs = import nixpkgs { inherit system; };
       serverDnsName = "testvm";
       numClientVms = 2;
+      heartbeatIntervalSeconds = 0.5;
       lib = pkgs.lib;
       clientNodeNames = builtins.genList (i: "client${toString (i + 1)}") numClientVms;
 
@@ -136,7 +137,7 @@
 
             intervalSeconds = lib.mkOption {
               type = lib.types.number;
-              default = 5;
+              default = 0.1;
               description = "Seconds between heartbeats.";
             };
           };
@@ -199,6 +200,7 @@
               networking.hostName = clientName;
               services.heartbeatDemoClient.enable = true;
               services.heartbeatDemoClient.serverHost = serverDnsName;
+              services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds;
             }
           );
 
@@ -266,6 +268,7 @@
             networking.hostName = "heartbeat-client";
             services.heartbeatDemoClient.enable = true;
             services.heartbeatDemoClient.serverHost = serverDnsName;
+            services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds;
           })
         ];
       };

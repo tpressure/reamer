@@ -104,6 +104,12 @@ There is also a single place to change how many client VMs the integration test 
 numClientVms = 2;
 ```
 
+And there is a single place to change the heartbeat interval used by the default client image and the integration test clients:
+
+```nix
+heartbeatIntervalSeconds = 0.5;
+```
+
 ### Configuring the VM images
 
 The flake defines NixOS options for both images:
@@ -148,7 +154,7 @@ For example, to build a client image that points at a cloud DNS name, import the
 }
 ```
 
-`services.heartbeatDemoClient.serverHost` should always be set by the Nix configuration that enables the client service.
+`services.heartbeatDemoClient.serverHost` should always be set by the Nix configuration that enables the client service. The default client image and the integration test clients both set `services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds`, which defaults to `0.5`.
 
 ## NixOS Integration Test
 
