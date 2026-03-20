@@ -36,6 +36,7 @@
         services.openssh.enable = lib.mkDefault true;
 
         environment.systemPackages = [
+          pkgs.curl
           pkgs.python3
         ];
 
@@ -156,11 +157,82 @@
           format = "raw";
           modules = [ commonModule ] ++ modules;
         };
+
+      integrationTest = (import "${pkgs.path}/nixos/tests/make-test-python.nix" ({ ... }: {
+        name = "heartbeat-demo-integration";
+
+        nodes = {
+          testvm = { ... }: {
+            imports = [ commonModule serverModule ];
+
+            networking.hostName = "testvm";
+            services.heartbeatDemoServer.enable = true;
+
+            virtualisation.forwardPorts = [
+              {
+                from = "host";
+                host.port = 4444;
+                guest.port = 2222;
+              }
+            ];
+          };
+
+          client1 = { ... }: {
+            imports = [ commonModule clientModule ];
+
+            networking.hostName = "client1";
+            services.heartbeatDemoClient.enable = true;
+          };
+
+          client2 = { ... }: {
+            imports = [ commonModule clientModule ];
+
+            networking.hostName = "client2";
+            services.heartbeatDemoClient.enable = true;
+          };
+        };
+
+        testScript = ''
+          start_all()
+
+          testvm.wait_for_unit("heartbeat-demo-server.service")
+          testvm.wait_for_open_port(12345)
+          testvm.wait_for_open_port(2222)
+
+          client1.wait_for_unit("heartbeat-demo-client.service")
+          client2.wait_for_unit("heartbeat-demo-client.service")
+
+          client1.wait_until_succeeds("getent hosts testvm")
+          client2.wait_until_succeeds("getent hosts testvm")
+
+          testvm.wait_until_succeeds(
+              "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'Total Clients: 2'"
+          )
+          testvm.wait_until_succeeds(
+              "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'client1'"
+          )
+          testvm.wait_until_succeeds(
+              "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'client2'"
+          )
+        '';
+      })) {
+        inherit system pkgs;
+      };
+
+      integrationTestDriver = pkgs.writeShellScriptBin "heartbeat-demo-integration-test-driver" ''
+        exec ${integrationTest.driverInteractive}/bin/nixos-test-driver "$@"
+      '';
     in
     {
+      checks.${system} = {
+        integration = integrationTest;
+      };
+
       packages.${system} = {
         default = heartbeatDemo;
         heartbeat-demo = heartbeatDemo;
+        integration-test = integrationTest;
+        integration-test-driver = integrationTestDriver;
         server-image = mkRawImage [
           serverModule
           ({ ... }: {
@@ -175,8 +247,14 @@
             services.heartbeatDemoClient.enable = true;
           })
         ];
-        server.raw = self.packages.${system}.server-image;
-        client.raw = self.packages.${system}.client-image;
       };
+
+      apps.${system}.integration-test-driver = {
+        type = "app";
+        program = "${integrationTestDriver}/bin/heartbeat-demo-integration-test-driver";
+      };
+
+      server.raw = self.packages.${system}.server-image;
+      client.raw = self.packages.${system}.client-image;
     };
 }

@@ -102,3 +102,29 @@ The flake defines NixOS options for both images:
 - `services.heartbeatDemoClient.intervalSeconds`
 
 To customize an image, extend the corresponding module in `flake.nix`.
+
+## NixOS Integration Test
+
+The flake also defines a 3-node NixOS integration test:
+
+- `testvm`: runs the server
+- `client1`: runs the client
+- `client2`: runs the client
+
+Run the test as a standard flake check with:
+
+```bash
+nix build .#checks.x86_64-linux.integration
+```
+
+If you want to run the test driver interactively and reach the server VM from your local machine, use:
+
+```bash
+nix run .#integration-test-driver
+```
+
+While that driver is running, the server VM's HTTP status page is forwarded to your host on port `4444`:
+
+```bash
+http://127.0.0.1:4444/
+```
