@@ -13,6 +13,7 @@
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
+      serverDnsName = "testvm";
 
       heartbeatDemo = pkgs.stdenvNoCC.mkDerivation {
         pname = "heartbeat-demo";
@@ -120,7 +121,7 @@
 
             serverHost = lib.mkOption {
               type = lib.types.str;
-              default = "testvm";
+              example = serverDnsName;
               description = "DNS name or host of the heartbeat server.";
             };
 
@@ -173,7 +174,8 @@
           testvm = { ... }: {
             imports = [ commonModule serverModule ];
 
-            networking.hostName = "testvm";
+            system.name = "server";
+            networking.hostName = serverDnsName;
             services.heartbeatDemoServer.enable = true;
 
             virtualisation.forwardPorts = [
@@ -188,38 +190,42 @@
           client1 = { ... }: {
             imports = [ commonModule clientModule ];
 
+            system.name = "client1";
             networking.hostName = "client1";
             services.heartbeatDemoClient.enable = true;
+            services.heartbeatDemoClient.serverHost = serverDnsName;
           };
 
           client2 = { ... }: {
             imports = [ commonModule clientModule ];
 
+            system.name = "client2";
             networking.hostName = "client2";
             services.heartbeatDemoClient.enable = true;
+            services.heartbeatDemoClient.serverHost = serverDnsName;
           };
         };
 
         testScript = ''
           start_all()
 
-          testvm.wait_for_unit("heartbeat-demo-server.service")
-          testvm.wait_for_open_port(12345)
-          testvm.wait_for_open_port(2222)
+          server.wait_for_unit("heartbeat-demo-server.service")
+          server.wait_for_open_port(12345)
+          server.wait_for_open_port(2222)
 
           client1.wait_for_unit("heartbeat-demo-client.service")
           client2.wait_for_unit("heartbeat-demo-client.service")
 
-          client1.wait_until_succeeds("getent hosts testvm")
-          client2.wait_until_succeeds("getent hosts testvm")
+          client1.wait_until_succeeds("getent hosts ${serverDnsName}")
+          client2.wait_until_succeeds("getent hosts ${serverDnsName}")
 
-          testvm.wait_until_succeeds(
+          server.wait_until_succeeds(
               "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'Total Clients: 2'"
           )
-          testvm.wait_until_succeeds(
+          server.wait_until_succeeds(
               "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'client1'"
           )
-          testvm.wait_until_succeeds(
+          server.wait_until_succeeds(
               "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'client2'"
           )
         '';
@@ -232,6 +238,12 @@
       '';
     in
     {
+      nixosModules = {
+        heartbeat-demo-common = commonModule;
+        heartbeat-demo-server = serverModule;
+        heartbeat-demo-client = clientModule;
+      };
+
       checks.${system} = {
         integration = integrationTest;
       };
@@ -253,6 +265,7 @@
           ({ ... }: {
             networking.hostName = "heartbeat-client";
             services.heartbeatDemoClient.enable = true;
+            services.heartbeatDemoClient.serverHost = serverDnsName;
           })
         ];
       };

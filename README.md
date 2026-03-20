@@ -88,6 +88,15 @@ The server VM starts the TCP server on port `12345` and enables the HTTP status 
 ### Client image defaults
 
 The client VM starts automatically and connects to the server host name `testvm` on port `12345` by default.
+That DNS name is now set explicitly in the flake configuration for the default client image and for the integration test.
+
+In `flake.nix`, there is a single place to change that DNS name:
+
+```nix
+serverDnsName = "testvm";
+```
+
+The default client image and the integration test both use that value, so changing it there updates both together.
 
 ### Configuring the VM images
 
@@ -103,11 +112,43 @@ The flake defines NixOS options for both images:
 
 To customize an image, extend the corresponding module in `flake.nix`.
 
+The flake also exports reusable NixOS modules:
+
+- `nixosModules.heartbeat-demo-common`
+- `nixosModules.heartbeat-demo-server`
+- `nixosModules.heartbeat-demo-client`
+
+For example, to build a client image that points at a cloud DNS name, import the client module and override `services.heartbeatDemoClient.serverHost`:
+
+```nix
+{
+  inputs.heartbeat-demo.url = "path:/path/to/this/repo";
+
+  outputs = { self, nixpkgs, nixos-generators, heartbeat-demo, ... }: {
+    packages.x86_64-linux.client-cloud-image = nixos-generators.nixosGenerate {
+      system = "x86_64-linux";
+      format = "raw";
+      modules = [
+        heartbeat-demo.nixosModules.heartbeat-demo-common
+        heartbeat-demo.nixosModules.heartbeat-demo-client
+        {
+          networking.hostName = "heartbeat-client";
+          services.heartbeatDemoClient.enable = true;
+          services.heartbeatDemoClient.serverHost = "my-server.internal";
+        }
+      ];
+    };
+  };
+}
+```
+
+`services.heartbeatDemoClient.serverHost` should always be set by the Nix configuration that enables the client service.
+
 ## NixOS Integration Test
 
 The flake also defines a 3-node NixOS integration test:
 
-- `testvm`: runs the server
+- `testvm`: runs the server VM, with hostname taken from `serverDnsName`
 - `client1`: runs the client
 - `client2`: runs the client
 
