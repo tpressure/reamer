@@ -33,12 +33,20 @@
 
       commonModule = { lib, ... }: {
         networking.useDHCP = lib.mkDefault true;
+        security.sudo.wheelNeedsPassword = false;
         services.openssh.enable = lib.mkDefault true;
+        services.getty.autologinUser = "demo";
 
         environment.systemPackages = [
           pkgs.curl
           pkgs.python3
         ];
+
+        users.users.demo = {
+          isNormalUser = true;
+          extraGroups = [ "wheel" ];
+          initialPassword = "demo";
+        };
 
         system.stateVersion = "25.05";
       };
