@@ -143,6 +143,7 @@ class HeartbeatServer:
 
     def render_status_page(self) -> str:
         clients = self.get_clients_snapshot()
+        total_clients = len(clients)
         threshold_summary = (
             f"Green: <= {self.healthy_threshold_ms} ms, "
             f"Yellow: <= {self.warning_threshold_ms} ms, "
@@ -192,6 +193,7 @@ class HeartbeatServer:
     tr.status-healthy td {{ background: #d3f9d8; }}
     tr.status-warning td {{ background: #fff3bf; }}
     tr.status-stale td {{ background: #ffe3e3; }}
+    .summary {{ font-weight: 600; margin-bottom: 0.5rem; }}
     .thresholds {{ margin-bottom: 1rem; color: #444; }}
     .reset-button {{ background: #c92a2a; border: none; border-radius: 0.35rem; color: #fff; cursor: pointer; font: inherit; padding: 0.7rem 1rem; }}
     .reset-button:hover {{ background: #a61e1e; }}
@@ -204,6 +206,7 @@ class HeartbeatServer:
       <button type="submit" class="reset-button">Reset Clients</button>
     </form>
   </div>
+  <p class="summary">Total Clients: {total_clients}</p>
   <p class="thresholds">{escape(threshold_summary)}</p>
   <table>
     <thead>
