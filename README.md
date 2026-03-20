@@ -27,7 +27,7 @@ To enable the HTTP status page:
 python3 server.py --enable-http
 ```
 
-The HTTP server is disabled by default. When enabled, it listens on port `8080` by default and shows the known clients and their latest heartbeat timestamps.
+The HTTP server is disabled by default. When enabled, it listens on port `8080` by default and shows the known clients, their latest heartbeat timestamps, and the longest observed delay between heartbeats for each client. If a client stops sending heartbeats, that max-gap value continues to grow with the current heartbeat age.
 
 To use a different HTTP port:
 
