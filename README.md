@@ -27,7 +27,7 @@ To enable the HTTP status page:
 python3 server.py --enable-http
 ```
 
-The HTTP server is disabled by default. When enabled, it listens on port `8080` by default and shows the known clients, their latest heartbeat timestamps, and the longest observed delay between heartbeats for each client. If a client stops sending heartbeats, that max-gap value continues to grow with the current heartbeat age.
+The HTTP server is disabled by default. When enabled, it listens on port `8080` by default and shows the known clients, their latest heartbeat timestamps, and the longest observed delay between heartbeats for each client. If a client stops sending heartbeats, that max-gap value continues to grow with the current heartbeat age. The page also includes a reset button that clears all tracked clients.
 
 To use a different HTTP port:
 
@@ -35,7 +35,7 @@ To use a different HTTP port:
 python3 server.py --enable-http --http-port 9001
 ```
 
-The status page also shows a green, yellow, or red indicator based on heartbeat age. By default:
+The status page colors each row green, yellow, or red based on heartbeat age. By default:
 
 - green: heartbeat age up to `5000` ms
 - yellow: heartbeat age up to `10000` ms
