@@ -258,14 +258,14 @@
         server-image = mkRawImage [
           serverModule
           ({ ... }: {
-            networking.hostName = "heartbeat-server";
+            networking.hostName = "";
             services.heartbeatDemoServer.enable = true;
           })
         ];
         client-image = mkRawImage [
           clientModule
           ({ ... }: {
-            networking.hostName = "heartbeat-client";
+            networking.hostName = "";
             services.heartbeatDemoClient.enable = true;
             services.heartbeatDemoClient.serverHost = serverDnsName;
             services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds;

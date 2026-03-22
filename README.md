@@ -84,11 +84,13 @@ The resulting raw images are available at:
 ### Server image defaults
 
 The server VM starts the TCP server on port `12345` and enables the HTTP status page on port `2222` by default.
+The raw image leaves `networking.hostName` empty so a DHCP server or cloud metadata can provide the instance hostname.
 
 ### Client image defaults
 
 The client VM starts automatically and connects to the server host name `testvm` on port `12345` by default.
 That DNS name is now set explicitly in the flake configuration for the default client image and for the integration test.
+The raw image leaves `networking.hostName` empty so a DHCP server or cloud metadata can provide the instance hostname.
 
 In `flake.nix`, there is a single place to change that DNS name:
 
@@ -144,7 +146,7 @@ For example, to build a client image that points at a cloud DNS name, import the
         heartbeat-demo.nixosModules.heartbeat-demo-common
         heartbeat-demo.nixosModules.heartbeat-demo-client
         {
-          networking.hostName = "heartbeat-client";
+          networking.hostName = "";
           services.heartbeatDemoClient.enable = true;
           services.heartbeatDemoClient.serverHost = "my-server.internal";
         }
