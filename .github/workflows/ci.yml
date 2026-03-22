@@ -48,9 +48,18 @@ jobs:
           cp result-server/nixos.img artifacts/server.raw
           cp result-client/nixos.img artifacts/client.raw
 
-      - name: Upload image artifacts
+      - name: Upload server image artifact
         uses: actions/upload-artifact@v4
         with:
-          name: images-${{ github.sha }}
-          path: artifacts/
+          name: server-image-${{ github.sha }}
+          path: artifacts/server.raw
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload client image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-image-${{ github.sha }}
+          path: artifacts/client.raw
+          compression-level: 0
           if-no-files-found: error
