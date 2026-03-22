@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run integration test
+        run: nix build .#checks.x86_64-linux.integration --print-build-logs
+
+  build-images:
+    name: Build Images
+    runs-on: ubuntu-latest
+    needs:
+      - integration-test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build server image
+        run: nix build .#server.raw --out-link result-server --print-build-logs
+
+      - name: Build client image
+        run: nix build .#client.raw --out-link result-client --print-build-logs
+
+      - name: Collect image artifacts
+        run: |
+          mkdir -p artifacts
+          cp result-server/nixos.img artifacts/server.raw
+          cp result-client/nixos.img artifacts/client.raw
+
+      - name: Upload image artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
