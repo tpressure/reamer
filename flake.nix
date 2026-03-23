@@ -54,6 +54,11 @@
         };
 
         system.stateVersion = "25.05";
+
+        boot.initrd.availableKernelModules = [
+          "virtio_blk"
+          "virtio_pci"
+        ];
       };
 
       serverModule = { lib, config, ... }:
