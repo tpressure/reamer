@@ -92,7 +92,7 @@ The raw image leaves `networking.hostName` empty so a DHCP server or cloud metad
 
 The client VM starts automatically and connects to the server host name `testvm` on port `12345` by default.
 That DNS name is now set explicitly in the flake configuration for the default client image and for the integration test.
-The raw image leaves `networking.hostName` empty and the client image assigns itself a random 10-letter lowercase hostname during boot before networking starts.
+The raw image leaves `networking.hostName` empty and the client image assigns itself a random 10-letter lowercase hostname during boot before systemd starts, so that name is already in use on the first boot.
 
 In `flake.nix`, there is a single place to change that DNS name:
 
