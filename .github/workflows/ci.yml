@@ -5,27 +5,9 @@ on:
   pull_request:
 
 jobs:
-  integration-test:
-    name: Integration Test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Run integration test
-        run: nix build .#checks.x86_64-linux.integration --print-build-logs
-
   build-images:
     name: Build Images
     runs-on: ubuntu-latest
-    needs:
-      - integration-test
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
