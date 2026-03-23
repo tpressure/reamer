@@ -24,17 +24,17 @@ jobs:
       - name: Build client image
         run: nix build .#client.raw --out-link result-client --print-build-logs
 
-      - name: Collect image artifacts
+      - name: Package image artifacts
         run: |
           mkdir -p artifacts
-          cp result-server/nixos.img artifacts/server.raw
-          cp result-client/nixos.img artifacts/client.raw
+          tar -cjf artifacts/server-image.tar.bz2 -C result-server nixos.img
+          tar -cjf artifacts/client-image.tar.bz2 -C result-client nixos.img
 
       - name: Upload server image artifact
         uses: actions/upload-artifact@v4
         with:
           name: server-image-${{ github.sha }}
-          path: artifacts/server.raw
+          path: artifacts/server-image.tar.bz2
           compression-level: 0
           if-no-files-found: error
 
@@ -42,6 +42,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: client-image-${{ github.sha }}
-          path: artifacts/client.raw
+          path: artifacts/client-image.tar.bz2
           compression-level: 0
           if-no-files-found: error
