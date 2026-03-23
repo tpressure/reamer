@@ -167,7 +167,7 @@
       mkRawImage = modules:
         nixos-generators.nixosGenerate {
           inherit system;
-          format = "raw";
+          format = "raw-efi";
           modules = [ commonModule ] ++ modules;
         };
 
