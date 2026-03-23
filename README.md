@@ -92,7 +92,7 @@ The raw image leaves `networking.hostName` empty so a DHCP server or cloud metad
 
 The client VM starts automatically and connects to the server host name `testvm` on port `12345` by default.
 That DNS name is now set explicitly in the flake configuration for the default client image and for the integration test.
-The raw image leaves `networking.hostName` empty so a DHCP server or cloud metadata can provide the instance hostname.
+The raw image leaves `networking.hostName` empty and the client image assigns itself a random 10-letter lowercase hostname during boot before networking starts.
 
 In `flake.nix`, there is a single place to change that DNS name:
 
@@ -125,6 +125,7 @@ The flake defines NixOS options for both images:
 - `services.heartbeatDemoClient.serverHost`
 - `services.heartbeatDemoClient.serverPort`
 - `services.heartbeatDemoClient.intervalSeconds`
+- `services.heartbeatDemoClient.randomizeHostname`
 
 To customize an image, extend the corresponding module in `flake.nix`.
 
@@ -151,6 +152,7 @@ For example, to build a client image that points at a cloud DNS name, import the
           networking.hostName = "";
           services.heartbeatDemoClient.enable = true;
           services.heartbeatDemoClient.serverHost = "my-server.internal";
+          services.heartbeatDemoClient.randomizeHostname = true;
         }
       ];
     };
@@ -159,6 +161,7 @@ For example, to build a client image that points at a cloud DNS name, import the
 ```
 
 `services.heartbeatDemoClient.serverHost` should always be set by the Nix configuration that enables the client service. The default client image and the integration test clients both set `services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds`, which defaults to `0.5`.
+The default client image also sets `services.heartbeatDemoClient.randomizeHostname = true`.
 
 ## NixOS Integration Test
 
