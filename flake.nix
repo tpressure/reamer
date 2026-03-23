@@ -13,7 +13,7 @@
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
-      serverDnsName = "testvm";
+      serverDnsName = "ssh-gateway.i748122-test.c.qa-de-1.cloud.sap";
       numClientVms = 2;
       heartbeatIntervalSeconds = 0.5;
       lib = pkgs.lib;
