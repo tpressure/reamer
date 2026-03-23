@@ -145,14 +145,38 @@
               default = 0.1;
               description = "Seconds between heartbeats.";
             };
+
+            randomizeHostname = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Assign a random 10-letter hostname during boot before networking starts.";
+            };
           };
 
           config = lib.mkIf cfg.enable {
+            systemd.services.heartbeat-demo-randomize-hostname = lib.mkIf cfg.randomizeHostname {
+              description = "Assign a random hostname for the heartbeat demo client";
+              wantedBy = [ "network-pre.target" ];
+              before = [ "network-pre.target" "heartbeat-demo-client.service" ];
+              after = [ "local-fs.target" ];
+
+              serviceConfig = {
+                Type = "oneshot";
+                RemainAfterExit = true;
+              };
+
+              script = ''
+                hostname="$(${pkgs.coreutils}/bin/tr -dc 'a-z' < /dev/urandom | ${pkgs.coreutils}/bin/head -c 10)"
+                ${pkgs.coreutils}/bin/printf '%s\n' "$hostname" > /etc/hostname
+                ${pkgs.systemd}/bin/hostnamectl set-hostname --static "$hostname"
+              '';
+            };
+
             systemd.services.heartbeat-demo-client = {
               description = "Heartbeat demo client";
               wantedBy = [ "multi-user.target" ];
-              after = [ "network-online.target" ];
-              wants = [ "network-online.target" ];
+              after = [ "network-online.target" ] ++ lib.optional cfg.randomizeHostname "heartbeat-demo-randomize-hostname.service";
+              wants = [ "network-online.target" ] ++ lib.optional cfg.randomizeHostname "heartbeat-demo-randomize-hostname.service";
 
               serviceConfig = {
                 ExecStart = lib.concatStringsSep " " [
@@ -274,6 +298,7 @@
             services.heartbeatDemoClient.enable = true;
             services.heartbeatDemoClient.serverHost = serverDnsName;
             services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds;
+            services.heartbeatDemoClient.randomizeHostname = true;
           })
         ];
       };
