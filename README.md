@@ -63,7 +63,7 @@ python3 client.py --host 127.0.0.1 --port 12345 --client-id client-a --interval 
 
 ## Nix Flake
 
-This repo also exposes two raw NixOS images through flakes:
+This repo also exposes two UEFI-bootable raw NixOS images through flakes:
 
 - `server.raw`: runs the heartbeat server automatically
 - `client.raw`: runs the heartbeat client automatically
@@ -80,6 +80,8 @@ The resulting raw images are available at:
 ```bash
 ./result
 ```
+
+The generated raw images use the upstream `raw-efi` image format, so they boot via UEFI rather than legacy BIOS.
 
 ### Server image defaults
 
@@ -141,7 +143,7 @@ For example, to build a client image that points at a cloud DNS name, import the
   outputs = { self, nixpkgs, nixos-generators, heartbeat-demo, ... }: {
     packages.x86_64-linux.client-cloud-image = nixos-generators.nixosGenerate {
       system = "x86_64-linux";
-      format = "raw";
+      format = "raw-efi";
       modules = [
         heartbeat-demo.nixosModules.heartbeat-demo-common
         heartbeat-demo.nixosModules.heartbeat-demo-client
