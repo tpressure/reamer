@@ -21,7 +21,7 @@
 
       heartbeatDemo = pkgs.stdenvNoCC.mkDerivation {
         pname = "heartbeat-demo";
-        version = "1.0.0";
+        version = "1.0.1";
         src = ./.;
 
         dontConfigure = true;
@@ -154,29 +154,17 @@
           };
 
           config = lib.mkIf cfg.enable {
-            systemd.services.heartbeat-demo-randomize-hostname = lib.mkIf cfg.randomizeHostname {
-              description = "Assign a random hostname for the heartbeat demo client";
-              wantedBy = [ "network-pre.target" ];
-              before = [ "network-pre.target" "heartbeat-demo-client.service" ];
-              after = [ "local-fs.target" ];
-
-              serviceConfig = {
-                Type = "oneshot";
-                RemainAfterExit = true;
-              };
-
-              script = ''
+            boot.postBootCommands = lib.mkIf cfg.randomizeHostname ''
                 hostname="$(${pkgs.coreutils}/bin/tr -dc 'a-z' < /dev/urandom | ${pkgs.coreutils}/bin/head -c 10)"
                 ${pkgs.coreutils}/bin/printf '%s\n' "$hostname" > /etc/hostname
-                ${pkgs.systemd}/bin/hostnamectl set-hostname --static "$hostname"
-              '';
-            };
+                ${pkgs.coreutils}/bin/printf '%s\n' "$hostname" > /proc/sys/kernel/hostname
+            '';
 
             systemd.services.heartbeat-demo-client = {
               description = "Heartbeat demo client";
               wantedBy = [ "multi-user.target" ];
-              after = [ "network-online.target" ] ++ lib.optional cfg.randomizeHostname "heartbeat-demo-randomize-hostname.service";
-              wants = [ "network-online.target" ] ++ lib.optional cfg.randomizeHostname "heartbeat-demo-randomize-hostname.service";
+              after = [ "network-online.target" ];
+              wants = [ "network-online.target" ];
 
               serviceConfig = {
                 ExecStart = lib.concatStringsSep " " [
