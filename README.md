@@ -93,6 +93,7 @@ The raw image leaves `networking.hostName` empty so a DHCP server or cloud metad
 The client VM starts automatically and connects to the server host name `testvm` on port `12345` by default.
 That DNS name is now set explicitly in the flake configuration for the default client image and for the integration test.
 The raw image leaves `networking.hostName` empty and the client image assigns itself a random 10-letter lowercase hostname during boot before systemd starts, so that name is already in use on the first boot.
+The default client image also enables cloud-init and checks `/etc/heartbeat-demo/server-host` during startup. If that file exists, its first line overrides the built-in `serverDnsName` value used for `client.py`.
 
 In `flake.nix`, there is a single place to change that DNS name:
 
@@ -124,6 +125,7 @@ The flake defines NixOS options for both images:
 - `services.heartbeatDemoServer.warningThresholdMs`
 - `services.heartbeatDemoClient.serverHost`
 - `services.heartbeatDemoClient.serverPort`
+- `services.heartbeatDemoClient.serverHostOverrideFile`
 - `services.heartbeatDemoClient.intervalSeconds`
 - `services.heartbeatDemoClient.randomizeHostname`
 
@@ -162,6 +164,18 @@ For example, to build a client image that points at a cloud DNS name, import the
 
 `services.heartbeatDemoClient.serverHost` should always be set by the Nix configuration that enables the client service. The default client image and the integration test clients both set `services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds`, which defaults to `0.5`.
 The default client image also sets `services.heartbeatDemoClient.randomizeHostname = true`.
+The default client image also enables cloud-init, sets `services.cloud-init.settings.preserve_hostname = true`, and uses `services.heartbeatDemoClient.serverHostOverrideFile = "/etc/heartbeat-demo/server-host"`.
+
+To override the client target through cloud-init user-data on the default image, write that file from cloud-init:
+
+```yaml
+#cloud-config
+write_files:
+  - path: /etc/heartbeat-demo/server-host
+    permissions: "0644"
+    content: |
+      my-server.internal
+```
 
 ## NixOS Integration Test
 
@@ -174,6 +188,12 @@ Run the test as a standard flake check with:
 
 ```bash
 nix build .#checks.x86_64-linux.integration
+```
+
+There is also a dedicated cloud-init override integration test that verifies a client can boot with a wrong built-in `serverHost`, receive `/etc/heartbeat-demo/server-host` from cloud-init, and still connect successfully:
+
+```bash
+nix build .#checks.x86_64-linux.integration-cloud-init-override
 ```
 
 If you want to run the test driver interactively and reach the server VM from your local machine, use:

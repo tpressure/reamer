@@ -18,6 +18,27 @@
       heartbeatIntervalSeconds = 0.5;
       lib = pkgs.lib;
       clientNodeNames = builtins.genList (i: "client${toString (i + 1)}") numClientVms;
+      cloudInitOverrideMetadata = pkgs.stdenv.mkDerivation {
+        name = "heartbeat-demo-cloud-init-override-metadata";
+        buildCommand = ''
+          mkdir -p $out/iso
+
+          cat <<'EOF' > $out/iso/user-data
+          #cloud-config
+          write_files:
+            - path: /etc/heartbeat-demo/server-host
+              permissions: "0644"
+              content: |
+                ${serverDnsName}
+          EOF
+
+          cat <<'EOF' > $out/iso/meta-data
+          instance-id: iid-heartbeat-client-override
+          EOF
+
+          ${pkgs.cdrkit}/bin/genisoimage -volid cidata -joliet -rock -o $out/metadata.iso $out/iso
+        '';
+      };
 
       heartbeatDemo = pkgs.stdenvNoCC.mkDerivation {
         pname = "heartbeat-demo";
@@ -140,6 +161,12 @@
               description = "TCP port used by the heartbeat server.";
             };
 
+            serverHostOverrideFile = lib.mkOption {
+              type = lib.types.str;
+              default = "/etc/heartbeat-demo/server-host";
+              description = "Path to a runtime override file whose first line replaces serverHost.";
+            };
+
             intervalSeconds = lib.mkOption {
               type = lib.types.number;
               default = 0.1;
@@ -163,17 +190,24 @@
             systemd.services.heartbeat-demo-client = {
               description = "Heartbeat demo client";
               wantedBy = [ "multi-user.target" ];
-              after = [ "network-online.target" ];
-              wants = [ "network-online.target" ];
+              after = [ "network-online.target" ] ++ lib.optional config.services.cloud-init.enable "cloud-final.service";
+              wants = [ "network-online.target" ] ++ lib.optional config.services.cloud-init.enable "cloud-final.service";
 
               serviceConfig = {
-                ExecStart = lib.concatStringsSep " " [
-                  "${pkgs.python3}/bin/python3"
-                  "${heartbeatDemo}/libexec/heartbeat-demo/client.py"
-                  "--host" cfg.serverHost
-                  "--port" (toString cfg.serverPort)
-                  "--interval" (toString cfg.intervalSeconds)
-                ];
+                ExecStart = pkgs.writeShellScript "heartbeat-demo-client-start" ''
+                  set -eu
+
+                  server_host=${lib.escapeShellArg cfg.serverHost}
+                  if [ -s ${lib.escapeShellArg cfg.serverHostOverrideFile} ]; then
+                    IFS= read -r server_host < ${lib.escapeShellArg cfg.serverHostOverrideFile}
+                  fi
+
+                  exec ${pkgs.python3}/bin/python3 \
+                    ${heartbeatDemo}/libexec/heartbeat-demo/client.py \
+                    --host "$server_host" \
+                    --port ${lib.escapeShellArg (toString cfg.serverPort)} \
+                    --interval ${lib.escapeShellArg (toString cfg.intervalSeconds)}
+                '';
                 Restart = "always";
                 RestartSec = 2;
               };
@@ -252,6 +286,55 @@
         inherit system pkgs;
       };
 
+      cloudInitOverrideIntegrationTest = (import "${pkgs.path}/nixos/tests/make-test-python.nix" ({ ... }: {
+        name = "heartbeat-demo-cloud-init-override";
+
+        nodes = {
+          testvm = { ... }: {
+            imports = [ commonModule serverModule ];
+
+            system.name = "server";
+            networking.hostName = serverDnsName;
+            services.heartbeatDemoServer.enable = true;
+          };
+
+          client1 = { ... }: {
+            imports = [ commonModule clientModule ];
+
+            system.name = "client1";
+            networking.hostName = "client1";
+            services.cloud-init.enable = true;
+            services.cloud-init.settings.preserve_hostname = true;
+            services.heartbeatDemoClient.enable = true;
+            services.heartbeatDemoClient.serverHost = "does-not-resolve.invalid";
+            services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds;
+            virtualisation.qemu.options = [ "-cdrom" "${cloudInitOverrideMetadata}/metadata.iso" ];
+          };
+        };
+
+        testScript = ''
+          start_all()
+
+          server.wait_for_unit("heartbeat-demo-server.service")
+          server.wait_for_open_port(12345)
+          server.wait_for_open_port(2222)
+
+          client1.wait_for_unit("cloud-init-local.service")
+          client1.wait_for_unit("cloud-final.service")
+          client1.wait_for_unit("heartbeat-demo-client.service")
+          client1.succeed("test \"$(cat /etc/heartbeat-demo/server-host)\" = \"${serverDnsName}\"")
+
+          server.wait_until_succeeds(
+              "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'Total Clients: 1'"
+          )
+          server.wait_until_succeeds(
+              "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'client1'"
+          )
+        '';
+      })) {
+        inherit system pkgs;
+      };
+
       integrationTestDriver = pkgs.writeShellScriptBin "heartbeat-demo-integration-test-driver" ''
         exec ${integrationTest.driverInteractive}/bin/nixos-test-driver "$@"
       '';
@@ -265,6 +348,7 @@
 
       checks.${system} = {
         integration = integrationTest;
+        integration-cloud-init-override = cloudInitOverrideIntegrationTest;
       };
 
       packages.${system} = {
@@ -283,6 +367,8 @@
           clientModule
           ({ ... }: {
             networking.hostName = "";
+            services.cloud-init.enable = true;
+            services.cloud-init.settings.preserve_hostname = true;
             services.heartbeatDemoClient.enable = true;
             services.heartbeatDemoClient.serverHost = serverDnsName;
             services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds;
