@@ -14,6 +14,7 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
       serverDnsName = "testvm";
+      containerServerDnsName = "testvm";
       numClientVms = 2;
       heartbeatIntervalSeconds = 0.5;
       lib = pkgs.lib;
@@ -33,6 +34,29 @@
           cp server.py client.py $out/libexec/heartbeat-demo/
           chmod +x $out/libexec/heartbeat-demo/server.py $out/libexec/heartbeat-demo/client.py
           runHook postInstall
+        '';
+      };
+
+      serverContainerEntrypoint = pkgs.writeShellApplication {
+        name = "heartbeat-demo-server";
+        text = ''
+          exec ${pkgs.python3}/bin/python3 ${heartbeatDemo}/libexec/heartbeat-demo/server.py \
+            --host "''${HEARTBEAT_BIND_HOST:-0.0.0.0}" \
+            --port "''${HEARTBEAT_TCP_PORT:-12345}" \
+            --enable-http \
+            --http-port "''${HEARTBEAT_HTTP_PORT:-2222}" \
+            --healthy-threshold-ms "''${HEARTBEAT_HEALTHY_THRESHOLD_MS:-5000}" \
+            --warning-threshold-ms "''${HEARTBEAT_WARNING_THRESHOLD_MS:-10000}"
+        '';
+      };
+
+      clientContainerEntrypoint = pkgs.writeShellApplication {
+        name = "heartbeat-demo-client";
+        text = ''
+          exec ${pkgs.python3}/bin/python3 ${heartbeatDemo}/libexec/heartbeat-demo/client.py \
+            --host "''${HEARTBEAT_SERVER_HOST:-${containerServerDnsName}}" \
+            --port "''${HEARTBEAT_SERVER_PORT:-12345}" \
+            --interval "''${HEARTBEAT_INTERVAL_SECONDS:-${toString heartbeatIntervalSeconds}}"
         '';
       };
 
@@ -188,6 +212,33 @@
           modules = [ commonModule ] ++ modules;
         };
 
+      serverContainerImage = pkgs.dockerTools.buildLayeredImage {
+        name = "heartbeat-demo-server";
+        tag = "latest";
+        contents = [ serverContainerEntrypoint ];
+        config = {
+          Entrypoint = [ "${serverContainerEntrypoint}/bin/heartbeat-demo-server" ];
+          ExposedPorts = {
+            "12345/tcp" = { };
+            "2222/tcp" = { };
+          };
+        };
+      };
+
+      clientContainerImage = pkgs.dockerTools.buildLayeredImage {
+        name = "heartbeat-demo-client";
+        tag = "latest";
+        contents = [ clientContainerEntrypoint ];
+        config = {
+          Entrypoint = [ "${clientContainerEntrypoint}/bin/heartbeat-demo-client" ];
+          Env = [
+            "HEARTBEAT_SERVER_HOST=${containerServerDnsName}"
+            "HEARTBEAT_SERVER_PORT=12345"
+            "HEARTBEAT_INTERVAL_SECONDS=${toString heartbeatIntervalSeconds}"
+          ];
+        };
+      };
+
       integrationTest = (import "${pkgs.path}/nixos/tests/make-test-python.nix" ({ ... }: {
         name = "heartbeat-demo-integration";
 
@@ -272,6 +323,8 @@
         heartbeat-demo = heartbeatDemo;
         integration-test = integrationTest;
         integration-test-driver = integrationTestDriver;
+        server-container = serverContainerImage;
+        client-container = clientContainerImage;
         server-image = mkRawImage [
           serverModule
           ({ ... }: {
@@ -298,5 +351,7 @@
 
       server.raw = self.packages.${system}.server-image;
       client.raw = self.packages.${system}.client-image;
+      server.container = self.packages.${system}.server-container;
+      client.container = self.packages.${system}.client-container;
     };
 }

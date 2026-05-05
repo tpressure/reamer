@@ -63,12 +63,14 @@ python3 client.py --host 127.0.0.1 --port 12345 --client-id client-a --interval 
 
 ## Nix Flake
 
-This repo also exposes two UEFI-bootable raw NixOS images through flakes:
+This repo also exposes two UEFI-bootable raw NixOS images and two Docker-compatible container image archives through flakes:
 
 - `server.raw`: runs the heartbeat server automatically
 - `client.raw`: runs the heartbeat client automatically
+- `server.container`: runs the heartbeat server as a container entrypoint
+- `client.container`: runs the heartbeat client as a container entrypoint
 
-Build them with:
+Build the raw VM images with:
 
 ```bash
 nix build .#server.raw
@@ -83,24 +85,70 @@ The resulting raw images are available at:
 
 The generated raw images use the upstream `raw-efi` image format, so they boot via UEFI rather than legacy BIOS.
 
+Build the container image archives with:
+
+```bash
+nix build .#server.container
+nix build .#client.container
+```
+
+Load the resulting archive into Docker or Podman:
+
+```bash
+docker load < result
+podman load -i result
+```
+
+Example container run using the default container server DNS name:
+
+```bash
+docker network create heartbeat-demo
+docker run --rm --name testvm --network heartbeat-demo -p 12345:12345 -p 2222:2222 heartbeat-demo-server:latest
+docker run --rm --network heartbeat-demo heartbeat-demo-client:latest
+```
+
+To point the client container at a different server when starting it, override `HEARTBEAT_SERVER_HOST` and, if needed, `HEARTBEAT_SERVER_PORT`:
+
+```bash
+docker run --rm --network heartbeat-demo \
+  -e HEARTBEAT_SERVER_HOST=my-server.internal \
+  -e HEARTBEAT_SERVER_PORT=9000 \
+  heartbeat-demo-client:latest
+```
+
 ### Server image defaults
 
 The server VM starts the TCP server on port `12345` and enables the HTTP status page on port `2222` by default.
 The raw image leaves `networking.hostName` empty so a DHCP server or cloud metadata can provide the instance hostname.
 
+The server container uses the same ports by default. It accepts these environment variables:
+
+- `HEARTBEAT_BIND_HOST`
+- `HEARTBEAT_TCP_PORT`
+- `HEARTBEAT_HTTP_PORT`
+- `HEARTBEAT_HEALTHY_THRESHOLD_MS`
+- `HEARTBEAT_WARNING_THRESHOLD_MS`
+
 ### Client image defaults
 
-The client VM starts automatically and connects to the server host name `testvm` on port `12345` by default.
+The client VM starts automatically and connects to the server host name `ssh-gateway.i748122-test.c.qa-de-1.cloud.sap` on port `12345` by default.
 That DNS name is now set explicitly in the flake configuration for the default client image and for the integration test.
 The raw image leaves `networking.hostName` empty and the client image assigns itself a random 10-letter lowercase hostname during boot before systemd starts, so that name is already in use on the first boot.
 
-In `flake.nix`, there is a single place to change that DNS name:
+The client container connects to `testvm:12345` by default and sends a heartbeat every `0.5` seconds. It accepts these environment variables:
+
+- `HEARTBEAT_SERVER_HOST`: target server DNS name or IP address
+- `HEARTBEAT_SERVER_PORT`: target server TCP port
+- `HEARTBEAT_INTERVAL_SECONDS`: seconds between heartbeats
+
+In `flake.nix`, there is a single place to change the default raw VM server DNS name:
 
 ```nix
-serverDnsName = "testvm";
+serverDnsName = "ssh-gateway.i748122-test.c.qa-de-1.cloud.sap";
 ```
 
-The default client image and the integration test both use that value, so changing it there updates both together.
+The default raw client image and the integration test both use that value, so changing it there updates both together.
+The client container default is intentionally separate, and can be changed at runtime with `HEARTBEAT_SERVER_HOST` and `HEARTBEAT_SERVER_PORT`.
 
 There is also a single place to change how many client VMs the integration test starts:
 
