@@ -35,7 +35,7 @@ To use a different HTTP port:
 python3 server.py --enable-http --http-port 9001
 ```
 
-The status page colors each row green, yellow, or red based on heartbeat age. By default:
+The status page shows summary counts and compact green, yellow, or red status badges based on heartbeat age, with clients needing attention listed first. It updates the counts and client table every second without reloading the page (preserving the logo and table scroll position), and uses a small, cached logo thumbnail (about 5 KB) derived from `reamer-logo.png`, with no external fonts, scripts, or stylesheets. The `static/` directory must stay alongside `server.py` when deploying manually; the Nix package includes it automatically. By default:
 
 - green: heartbeat age up to `5000` ms
 - yellow: heartbeat age up to `10000` ms

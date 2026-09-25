@@ -55,6 +55,7 @@
           runHook preInstall
           mkdir -p $out/libexec/heartbeat-demo
           cp server.py client.py $out/libexec/heartbeat-demo/
+          cp -r static $out/libexec/heartbeat-demo/
           chmod +x $out/libexec/heartbeat-demo/server.py $out/libexec/heartbeat-demo/client.py
           runHook postInstall
         '';
