@@ -117,8 +117,8 @@ The raw image leaves `networking.hostName` empty so a DHCP server or cloud metad
 
 ### Client image defaults
 
-The client VM starts automatically and connects to the server host name `testvm` on port `12345` by default.
-That DNS name is now set explicitly in the flake configuration for the default client image and for the integration test.
+The client VM starts automatically and connects to the server configured by `serverDnsName` on port `12345` by default.
+That DNS name is set in the flake configuration for the default client image and for the integration test.
 The raw image leaves `networking.hostName` empty and the client image assigns itself a random 10-letter lowercase hostname during boot before systemd starts, so that name is already in use on the first boot.
 The default client image also enables cloud-init and checks `/etc/heartbeat-demo/server-host` during startup. If that file exists, its first line overrides the built-in `serverDnsName` value used for `client.py`.
 
@@ -129,6 +129,7 @@ serverDnsName = "testvm";
 ```
 
 The default client image and the integration test both use that value, so changing it there updates both together.
+It may be a short hostname or a fully qualified DNS name. The integration test splits a fully qualified name into the server VM's hostname and domain, and maps that name to the local test VM for every test client.
 
 There is also a dedicated built-in target for the `cloud-init.raw` image:
 
@@ -216,7 +217,7 @@ write_files:
 
 The flake also defines a 3-node NixOS integration test:
 
-- `testvm`: runs the server VM, with hostname taken from `serverDnsName`
+- `testvm`: runs the server VM, with hostname and optional domain taken from `serverDnsName`
 - `client1` ... `clientN`: runs the clients, with the count taken from `numClientVms`
 
 Run the test as a standard flake check with:

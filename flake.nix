@@ -19,6 +19,7 @@
       pkgs = import nixpkgs { inherit system; };
       serverDnsName = "testvm";
       serverDnsOverrideName = "testvm";
+      serverDnsLabels = lib.splitString "." serverDnsName;
       cloudInitOverrideServerDnsName = "cloud-init-server";
       cloudInitOverrideBuiltInServerHost = "does-not-resolve.invalid";
       numClientVms = 2;
@@ -260,7 +261,12 @@
               imports = [ commonModule serverModule ];
 
               system.name = "server";
-              networking.hostName = serverDnsName;
+              # NixOS hostName is a single label; the test network publishes
+              # hostName.domain as an alias for this VM on every test node.
+              networking.hostName = lib.head serverDnsLabels;
+              networking.domain = if lib.length serverDnsLabels > 1
+                then lib.concatStringsSep "." (lib.tail serverDnsLabels)
+                else null;
               services.heartbeatDemoServer.enable = true;
 
               virtualisation.forwardPorts = [
