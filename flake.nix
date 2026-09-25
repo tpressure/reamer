@@ -50,6 +50,13 @@
 
         dontConfigure = true;
         dontBuild = true;
+        doCheck = true;
+        nativeCheckInputs = [ pkgs.python3 ];
+        checkPhase = ''
+          runHook preCheck
+          python3 -m unittest discover -s tests -v
+          runHook postCheck
+        '';
 
         installPhase = ''
           runHook preInstall
@@ -284,6 +291,12 @@
 
             server.wait_until_succeeds(
                 "curl --fail --silent http://127.0.0.1:2222/ | grep -q 'Total Clients: ${toString numClientVms}'"
+            )
+            server.wait_until_succeeds(
+                "curl --fail --silent http://127.0.0.1:2222/status | grep -Eq 'CPU [0-9]+[.][0-9]+% average'"
+            )
+            server.wait_until_succeeds(
+                "curl --fail --silent http://127.0.0.1:2222/status | grep -Eq 'Memory [0-9]+[.][0-9]+% average'"
             )
           ''
           + "\n"

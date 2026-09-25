@@ -55,6 +55,12 @@ python3 client.py
 
 By default, the client connects to `127.0.0.1:12345` and sends a heartbeat every 5 seconds.
 
+On Linux, each heartbeat also reports machine-wide CPU and memory usage. CPU usage is the busy percentage across all cores since the previous sample (idle and I/O wait are excluded). The first CPU reading is unavailable until a second sample arrives. Memory usage is `(MemTotal - MemAvailable) / MemTotal`, so reclaimable memory is treated as available. These counters come from Linux's [`/proc` interface](https://docs.kernel.org/filesystems/proc.html); no additional Python packages are needed. Unavailable metrics are sent as `null`, and heartbeats continue on systems without these counters.
+
+Each client has two compact history charts covering the last 60 seconds, with twelve five-second bars on a fixed 0–100% scale. Bars show the average of samples received in that interval; hover for the value. Blank bars mean no samples arrived; hover the latest percentage to see the sample’s age. Sampling follows `--interval` (the Nix VMs default to 0.5 seconds). The server timestamps receipt using its own monotonic clock, retains at most 60 one-second aggregates per client, and expires old samples even after disconnection. History is kept in memory and cleared on reset or server restart. Older clients without metrics still appear normally.
+
+The optional heartbeat field is `"metrics": {"cpu_percent": 12.5, "memory_percent": 48.2}`. Each value must be a finite number from 0 to 100; invalid values are ignored independently.
+
 Example with explicit settings:
 
 ```bash

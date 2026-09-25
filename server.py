@@ -4,6 +4,8 @@ import argparse
 import json
 import socket
 import threading
+import time
+from collections import deque
 from hashlib import sha256
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +16,9 @@ DEFAULT_PORT = 12345
 DEFAULT_HTTP_PORT = 8080
 DEFAULT_HEALTHY_THRESHOLD_MS = 5000
 DEFAULT_WARNING_THRESHOLD_MS = 10000
+HISTORY_SECONDS = 60
+HISTOGRAM_BUCKET_SECONDS = 5
+METRIC_NAMES = ("cpu_percent", "memory_percent")
 
 
 class HeartbeatServer:
@@ -72,31 +77,48 @@ class HeartbeatServer:
                     print(f"Ignoring malformed message from {peer}: {line}")
                     continue
 
-                if message.get("type") != "heartbeat":
+                if not isinstance(message, dict) or message.get("type") != "heartbeat":
                     print(f"Ignoring unknown message type from {peer}: {message!r}")
                     continue
 
                 client_id = message.get("client_id") or peer
-                timestamp = datetime.now(timezone.utc)
-
-                with self.lock:
-                    existing_client = self.clients.get(client_id)
-                    max_gap_ms = 0
-                    if existing_client is not None:
-                        gap_ms = self.get_interval_ms(
-                            existing_client["last_heartbeat"],
-                            timestamp,
-                        )
-                        max_gap_ms = max(existing_client["max_gap_ms"], gap_ms)
-
-                    self.clients[client_id] = {
-                        "address": peer,
-                        "last_heartbeat": timestamp,
-                        "max_gap_ms": max_gap_ms,
-                    }
-                    self.print_clients_locked()
+                if not isinstance(client_id, str):
+                    continue
+                self.record_heartbeat(client_id, peer, message.get("metrics"))
 
         print(f"Client disconnected: {peer}")
+
+    def record_heartbeat(self, client_id: str, peer: str, metrics: object) -> None:
+        timestamp = datetime.now(timezone.utc)
+        second = int(time.monotonic())
+        if not isinstance(metrics, dict):
+            metrics = {}
+        with self.lock:
+            client = self.clients.setdefault(client_id, {
+                "max_gap_ms": 0,
+                "last_heartbeat": timestamp,
+                "history": deque(maxlen=HISTORY_SECONDS),
+            })
+            client["max_gap_ms"] = max(
+                client["max_gap_ms"], self.get_interval_ms(client["last_heartbeat"], timestamp)
+            )
+            client.update(address=peer, last_heartbeat=timestamp)
+            history = client["history"]
+            self.prune_history(history, second)
+            # At most one aggregate per second, even with very fast heartbeats.
+            if not history or history[-1]["second"] != second:
+                history.append({"second": second})
+            for name in METRIC_NAMES:
+                value = metrics.get(name)
+                if type(value) in (int, float) and 0 <= value <= 100:
+                    total, count = history[-1].get(name, (0, 0))
+                    history[-1][name] = (total + value, count + 1)
+            self.print_clients_locked()
+
+    @staticmethod
+    def prune_history(history: deque, second: int) -> None:
+        while history and history[0]["second"] <= second - HISTORY_SECONDS:
+            history.popleft()
 
     def print_clients_locked(self) -> None:
         print("\nKnown clients:")
@@ -161,7 +183,8 @@ class HeartbeatServer:
         print(f"HTTP status page enabled on http://{self.host}:{self.http_port}/")
 
     def render_status_content(self) -> str:
-        clients = self.get_clients_snapshot()
+        second = int(time.monotonic())
+        clients = self.get_clients_snapshot(second)
         total_clients = len(clients)
         ordered_clients = []
         for client in clients:
@@ -196,6 +219,12 @@ class HeartbeatServer:
                 f'<td class="numeric">{max_gap_ms} <span class="unit">ms</span></td>'
                 "</tr>"
             )
+            rows.append(
+                '<tr class="history-row"><td colspan="6"><div class="client-history">'
+                + self.render_histogram(client["history"], "cpu_percent", "CPU", second)
+                + self.render_histogram(client["history"], "memory_percent", "Memory", second)
+                + '</div></td></tr>'
+            )
 
         if not rows:
             rows.append(
@@ -228,7 +257,7 @@ class HeartbeatServer:
     </section>
     <section aria-labelledby="clients-heading">
       <div class="section-heading">
-        <h2 id="clients-heading">Clients</h2>
+        <div class="clients-title"><h2 id="clients-heading">Clients</h2><span class="history-key">60s history · 5s averages · 0–100%</span></div>
         <span class="summary-status {summary_status_class}">{summary_label}</span>
       </div>
       <div class="table-wrap{' is-empty' if not clients else ''}" tabindex="0" role="region" aria-label="Client heartbeat details">
@@ -295,6 +324,8 @@ class HeartbeatServer:
     .metric .metric-value {{ color: var(--status-color, var(--text)); }}
     .section-heading {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }}
     h2 {{ margin: 0; font-size: 16px; font-weight: 600; }}
+    .clients-title {{ display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; }}
+    .history-key {{ color: var(--muted); font-size: 10px; }}
     .summary-status {{ color: var(--status-color); font-size: 12px; }}
     .summary-status::before, .status-badge::before {{ content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 7px; vertical-align: middle; }}
     .table-wrap {{ overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); scrollbar-color: #435164 var(--panel); scrollbar-width: thin; }}
@@ -304,6 +335,18 @@ class HeartbeatServer:
     thead th {{ background: #18222e; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.045em; text-transform: uppercase; }}
     tbody tr + tr {{ border-top: 1px solid var(--border); }}
     tbody tr:hover {{ background: #18222e; }}
+    tbody tr.history-row {{ border-top: 0; }}
+    .history-row td {{ padding-top: 0; padding-bottom: 14px; }}
+    .client-history {{ display: flex; flex-wrap: wrap; gap: 8px 28px; }}
+    .history-chart {{ --chart-color: #71c7ff; display: grid; grid-template-columns: 100px 108px; align-items: center; gap: 12px; }}
+    .history-chart.memory_percent {{ --chart-color: #b4a2ff; }}
+    .history-heading {{ display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 11px; }}
+    .history-heading strong {{ color: var(--muted); font-weight: 500; }}
+    .history-reading {{ color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }}
+    .history-bars {{ display: grid; grid-template-columns: repeat(12, 1fr); gap: 2px; height: 22px; border-bottom: 1px solid var(--border); }}
+    .history-bar {{ display: flex; align-items: end; }}
+    .history-bar i {{ display: block; width: 100%; min-height: 1px; background: var(--chart-color); opacity: 0.65; border-radius: 1px 1px 0 0; }}
+    .history-bar:hover i {{ opacity: 1; }}
     .client-id {{ font-weight: 600; white-space: normal; overflow-wrap: anywhere; min-width: 120px; max-width: 280px; }}
     .status-badge {{ display: inline-block; border: 1px solid currentColor; border-radius: 6px; padding: 3px 8px; color: var(--status-color); font-size: 11px; font-weight: 600; }}
     .mono, .numeric {{ font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }}
@@ -328,6 +371,9 @@ class HeartbeatServer:
       .metric:nth-child(3) {{ border-left: 0; }}
       .metric:nth-child(n+3) {{ border-top: 1px solid var(--border); }}
       th, td {{ padding: 14px 16px; }}
+      .client-history {{ width: calc(100vw - 66px); gap: 8px; }}
+      .history-chart {{ grid-template-columns: 100px minmax(0, 1fr); width: 100%; }}
+      .summary-status {{ flex-shrink: 0; font-size: 11px; white-space: nowrap; }}
     }}
   </style>
 </head>
@@ -340,7 +386,7 @@ class HeartbeatServer:
     <header class="page-header">
       <div>
         <h1>Heartbeat status</h1>
-        <p class="subtitle">Connection health across your clients.</p>
+        <p class="subtitle">Connection health and resource usage across your clients.</p>
       </div>
       <form method="post" action="/reset">
         <button type="submit" class="reset-button">Reset Clients</button>
@@ -400,14 +446,63 @@ class HeartbeatServer:
 </html>
 """
 
-    def get_clients_snapshot(self) -> list[dict[str, object]]:
+    @staticmethod
+    def render_histogram(history: list[dict], name: str, label: str, second: int) -> str:
+        buckets = [[0, 0] for _ in range(HISTORY_SECONDS // HISTOGRAM_BUCKET_SECONDS)]
+        latest = None
+        for sample in history:
+            offset = sample["second"] - (second - HISTORY_SECONDS + 1)
+            if 0 <= offset < HISTORY_SECONDS and name in sample:
+                total, count = sample[name]
+                bucket = buckets[offset // HISTOGRAM_BUCKET_SECONDS]
+                bucket[0] += total
+                bucket[1] += count
+                latest = (total / count, second - sample["second"])
+
+        reading = "No samples"
+        display_value = "—"
+        if latest is not None:
+            value, age = latest
+            reading = f"{value:.1f}% · {age}s ago"
+            display_value = f"{value:.1f}%"
+        bars = []
+        for index, (total, count) in enumerate(buckets):
+            end = HISTORY_SECONDS - index * HISTOGRAM_BUCKET_SECONDS
+            start = end - HISTOGRAM_BUCKET_SECONDS
+            description = f"{start}–{end}s ago: "
+            fill = ""
+            if count:
+                value = total / count
+                description += f"{label} {value:.1f}% average"
+                fill = f'<i style="height: {value:.2f}%"></i>'
+            else:
+                description += "no samples"
+            bars.append(f'<span class="history-bar" title="{description}">{fill}</span>')
+
+        return (
+            f'<div class="history-chart {name}">'
+            f'<div class="history-heading"><strong>{label}</strong>'
+            f'<span class="history-reading" title="{reading}">{display_value}</span></div>'
+            f'<div class="history-bars" role="img" aria-label="{label} usage over the last 60 seconds; '
+            f'five-second averages on a 0 to 100 percent scale. Latest: {reading}. '
+            'Empty bars indicate missing samples.">'
+            + "".join(bars)
+            + '</div></div>'
+        )
+
+    def get_clients_snapshot(self, second: int | None = None) -> list[dict[str, object]]:
+        if second is None:
+            second = int(time.monotonic())
         with self.lock:
+            for client in self.clients.values():
+                self.prune_history(client.get("history", deque()), second)
             return [
                 {
                     "client_id": client_id,
                     "address": client["address"],
                     "last_heartbeat": client["last_heartbeat"],
                     "max_gap_ms": client["max_gap_ms"],
+                    "history": [dict(sample) for sample in client.get("history", [])],
                 }
                 for client_id, client in sorted(self.clients.items())
             ]
