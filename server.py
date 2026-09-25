@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import secrets
 import socket
 import threading
@@ -147,10 +148,16 @@ class HeartbeatServer:
                 raw = {}
             state = raw.get("state")
             result[kind] = {
-                "state": state if state in ("idle", "running", "error") else "unknown",
+                "state": state if state in ("idle", "running", "stopping", "error") else "unknown",
                 "last_command": raw.get("last_command", "")[:128] if isinstance(raw.get("last_command", ""), str) else "",
                 "error": raw.get("error", "")[:200] if isinstance(raw.get("error", ""), str) else "",
             }
+            if kind == "memory":
+                value = raw.get("write_mibps")
+                result[kind]["write_mibps"] = (
+                    value if state == "running" and type(value) in (int, float)
+                    and 0 <= value <= 1e12 and math.isfinite(value) else None
+                )
         return result
 
     def request_stress(self, client_id: str, kind: str, action: str) -> None:
@@ -162,6 +169,8 @@ class HeartbeatServer:
                 raise ValueError("Client is unavailable or needs an upgrade")
             if action == "start" and self.get_heartbeat_age_ms(client["last_heartbeat"]) > self.warning_threshold_ms:
                 raise ValueError("Wait for the client to reconnect before starting a test")
+            if action == "start" and client.get("stress", {}).get(kind, {}).get("state") == "stopping":
+                raise ValueError("Wait for the current stress test to finish stopping")
             self.pending_commands[(client_id, kind)] = {
                 "id": secrets.token_hex(16), "kind": kind, "action": action, "created": time.monotonic(),
             }
@@ -446,6 +455,7 @@ class HeartbeatServer:
     .stress-button:disabled, .stress-button[aria-disabled="true"] {{ opacity: 0.5; cursor: default; }}
     .stress-error, .control-feedback {{ color: var(--stale); font-size: 11px; white-space: normal; }}
     .stress-error {{ flex-basis: 100%; max-width: 440px; }}
+    .stress-bandwidth {{ color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }}
     .control-feedback:empty {{ display: none; }}
     .client-id {{ font-weight: 600; white-space: normal; overflow-wrap: anywhere; min-width: 120px; max-width: 280px; }}
     .client-capacity {{ display: block; margin-top: 3px; color: var(--muted); font-size: 11px; font-weight: 400; white-space: nowrap; }}
@@ -600,22 +610,23 @@ class HeartbeatServer:
         for kind, label in (("cpu", "CPU"), ("memory", "memory")):
             state = client["stress"].get(kind, {})
             pending = client["pending"].get(kind, {})
-            running = state.get("state") == "running" or pending.get("action") == "start"
+            stopping = state.get("state") == "stopping" or pending.get("action") == "stop"
+            running = state.get("state") in ("running", "stopping") or pending.get("action") == "start"
             action = "stop" if running else "start"
             text = f"Stop {label}" if running else f"{label.capitalize() if kind == 'memory' else label} stress"
-            title = "Use all available vCPUs" if kind == "cpu" else "Use half the vCPUs and half the total VM memory"
+            title = "Use all available vCPUs" if kind == "cpu" else "Use 80% of available vCPUs (rounded down, at least one) and half the total VM memory"
             disabled = not client["supports_control"] or (action == "start" and age_ms > self.warning_threshold_ms)
             if not client["supports_control"]:
                 title = "Upgrade this client to enable stress controls"
-            elif pending.get("action") == "stop":
-                text, title, disabled = f"Stopping {label}…", "Waiting for the client to confirm", False
+            elif stopping:
+                text, title, disabled = f"Stopping {label}…", "Waiting for process cleanup; heartbeats continue", False
             elif pending.get("action") == "start":
                 text, title = f"Cancel {label}", "Start requested; click to cancel or stop"
             elif running:
                 title = f"Stop the running {label} test"
             elif state.get("state") == "error":
                 text, title = f"Retry {label}", state.get("error", "Stress test failed")
-            pending_attribute = ' aria-disabled="true"' if pending.get("action") == "stop" else ""
+            pending_attribute = ' aria-disabled="true"' if stopping else ""
             forms.append(
                 '<form class="stress-form" method="post" action="/stress">'
                 f'<input type="hidden" name="token" value="{self.control_token}">'
@@ -626,6 +637,12 @@ class HeartbeatServer:
                 f'title="{escape(title, quote=True)}"{" disabled" if disabled else ""}'
                 f'{pending_attribute}>{text}</button></form>'
             )
+            if kind == "memory" and state.get("state") == "running" and not stopping:
+                bandwidth = state.get("write_mibps")
+                reading = "—" if bandwidth is None else (f"{bandwidth / 1024:.2f} GiB/s" if bandwidth >= 1024 else f"{bandwidth:.1f} MiB/s")
+                if age_ms > self.warning_threshold_ms:
+                    reading = "—"
+                forms.append(f'<span class="stress-bandwidth" title="Combined memtouch write bandwidth across all workers">Write {reading}</span>')
         errors = [state["error"] for state in client["stress"].values() if state.get("error")]
         if client["control_error"]:
             errors.append(client["control_error"])

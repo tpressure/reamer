@@ -2,7 +2,9 @@
 
 import argparse
 import json
+import math
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -15,6 +17,8 @@ DEFAULT_PORT = 12345
 DEFAULT_INTERVAL = 5.0
 DEFAULT_RETRY_DELAY = 2.0
 STRESS_KINDS = ("cpu", "memory")
+STRESS_STOP_GRACE_SECONDS = 2.0
+MEMORY_BANDWIDTH_MAX_AGE = 5.0
 
 
 def available_vcpus() -> int:
@@ -29,7 +33,11 @@ class StressManager:
 
     def __init__(self) -> None:
         self.processes = {}
+        self.stop_deadlines = {}
         self.states = {kind: {"state": "idle", "last_command": "", "error": ""} for kind in STRESS_KINDS}
+        self.bandwidth_buffer = b""
+        self.bandwidth_updated = None
+        self.states["memory"]["write_mibps"] = None
 
     @staticmethod
     def command(kind: str) -> list[str]:
@@ -38,23 +46,61 @@ class StressManager:
             return ["stress-ng", "--cpu", str(cpus), "--cpu-load", "100", "--timeout", "0"]
         if kind != "memory":
             raise ValueError("Unknown stress test")
-        workers = max(1, cpus // 2)
+        workers = max(1, cpus * 4 // 5)
         fields = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
         total_kib = int(fields["MemTotal"].split()[0])
-        per_worker_mib = total_kib // (2 * workers * 1024)
+        memory_budget_mib = total_kib // (2 * 1024)
+        per_worker_mib = memory_budget_mib // workers
         if per_worker_mib < 1:
             raise ValueError("Not enough memory for the requested test")
-        return ["memtouch", "--num_threads", str(workers), "--thread_mem", str(per_worker_mib), "--rw_ratio", "50"]
+        return ["memtouch", "--num_threads", str(workers), "--thread_mem", str(per_worker_mib),
+                "--rw_ratio", "100", "--stat_file", "/dev/stdout", "--stat_ival", "1000"]
+
+    def sample_bandwidth(self, process: subprocess.Popen) -> None:
+        # Read only available bytes, with bounded work and storage per heartbeat.
+        try:
+            chunk = os.read(process.stdout.fileno(), 65536)
+        except BlockingIOError:
+            chunk = b""
+        lines = (self.bandwidth_buffer + chunk).split(b"\n")
+        self.bandwidth_buffer = lines.pop()[-4096:]
+        for line in lines:
+            match = re.search(rb"\bwrite_mibps:([0-9]+(?:\.[0-9]+)?)\s*$", line)
+            if match:
+                value = float(match[1])
+                if math.isfinite(value):
+                    self.states["memory"]["write_mibps"] = value
+                    self.bandwidth_updated = time.monotonic()
+        if (self.states["memory"]["state"] != "running" or self.bandwidth_updated is None
+                or time.monotonic() - self.bandwidth_updated > MEMORY_BANDWIDTH_MAX_AGE):
+            self.states["memory"]["write_mibps"] = None
 
     def snapshot(self) -> dict:
         for kind, process in list(self.processes.items()):
+            if kind == "memory":
+                self.sample_bandwidth(process)
             code = process.poll()
             if code is not None:
-                # Clean up any remaining workers if their supervisor exited.
-                self.signal_group(process, signal.SIGKILL)
-                del self.processes[kind]
-                self.states[kind].update(state="idle" if code == 0 else "error", error="" if code == 0 else f"Process exited with code {code}")
+                self.finish(kind, process, code)
+            elif kind in self.stop_deadlines:
+                deadline = self.stop_deadlines[kind]
+                if deadline is not None and time.monotonic() >= deadline:
+                    self.signal_group(process, signal.SIGKILL)
+                    self.stop_deadlines[kind] = None
         return {kind: dict(state) for kind, state in self.states.items()}
+
+    def finish(self, kind: str, process: subprocess.Popen, code: int) -> None:
+        expected = code == 0 or (kind in self.stop_deadlines and code in (-signal.SIGTERM, -signal.SIGKILL))
+        # A supervisor may exit before all of its workers do.
+        self.signal_group(process, signal.SIGKILL)
+        del self.processes[kind]
+        self.stop_deadlines.pop(kind, None)
+        if kind == "memory":
+            process.stdout.close()
+            self.states[kind]["write_mibps"] = None
+            self.bandwidth_buffer = b""
+            self.bandwidth_updated = None
+        self.states[kind].update(state="idle" if expected else "error", error="" if expected else f"Process exited with code {code}")
 
     @staticmethod
     def signal_group(process: subprocess.Popen, sig: int) -> None:
@@ -66,16 +112,17 @@ class StressManager:
     def stop(self, kind: str) -> None:
         process = self.processes.get(kind)
         if process is not None:
+            if kind in self.stop_deadlines:
+                return
+            # Sending a signal is enough here. Reaping large memory workloads can
+            # take seconds; snapshot() polls them without delaying heartbeats.
             self.signal_group(process, signal.SIGTERM)
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.signal_group(process, signal.SIGKILL)
-                process.wait(timeout=2)
-            # A supervisor may exit before all of its workers do.
-            self.signal_group(process, signal.SIGKILL)
-            del self.processes[kind]
-        self.states[kind].update(state="idle", error="")
+            self.stop_deadlines[kind] = time.monotonic() + STRESS_STOP_GRACE_SECONDS
+            self.states[kind].update(state="stopping", error="")
+            if kind == "memory":
+                self.states[kind]["write_mibps"] = None
+        else:
+            self.states[kind].update(state="idle", error="")
 
     def apply(self, command: object) -> None:
         if not isinstance(command, dict):
@@ -90,16 +137,28 @@ class StressManager:
             if action == "stop":
                 self.stop(kind)
             elif kind not in self.processes:
-                process = subprocess.Popen(self.command(kind), start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+                process = subprocess.Popen(self.command(kind), start_new_session=True, stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.PIPE if kind == "memory" else subprocess.DEVNULL)
                 self.processes[kind] = process
+                if kind == "memory":
+                    os.set_blocking(process.stdout.fileno(), False)
                 self.states[kind].update(state="running", error="")
-        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
-            self.states[kind].update(state="running" if kind in self.processes else "error", error=str(exc)[:200])
+        except (OSError, ValueError, KeyError) as exc:
+            state = "stopping" if kind in self.stop_deadlines else "running" if kind in self.processes else "error"
+            self.states[kind].update(state=state, error=str(exc)[:200])
         self.states[kind]["last_command"] = command_id
 
     def close(self) -> None:
         for kind in STRESS_KINDS:
             self.stop(kind)
+        # Waiting is only appropriate when the client itself is shutting down.
+        for kind, process in list(self.processes.items()):
+            try:
+                code = process.wait(timeout=STRESS_STOP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                self.signal_group(process, signal.SIGKILL)
+                code = process.wait()
+            self.finish(kind, process, code)
 
 
 class SystemMetrics:

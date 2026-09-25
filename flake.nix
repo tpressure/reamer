@@ -352,8 +352,12 @@
                 client1.wait_until_succeeds("pgrep -x memtouch")
                 memory_pid = client1.succeed("pgrep -x memtouch").strip()
                 client1.succeed(f"ps -p {memory_pid} -o args= | grep -- '--num_threads 1'")
+                client1.succeed(f"ps -p {memory_pid} -o args= | grep -- '--rw_ratio 100'")
                 server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>Stop CPU</button>'")
                 server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>Stop memory</button>'")
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -Eq 'Write [1-9][0-9]*[.][0-9]+ [MG]iB/s'")
+                page = server.succeed("curl --fail --silent http://127.0.0.1:2222/status")
+                assert page.count('class="stress-bandwidth"') == 1
                 for other_client in [${lib.concatStringsSep ", " (lib.drop 1 clientNodeNames)}]:
                     other_client.fail("pgrep -x stress-ng")
                     other_client.fail("pgrep -x memtouch")
@@ -365,11 +369,18 @@
                 server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>Stop memory</button>'")
                 assert client1.succeed("pgrep -x stress-ng").strip() == cpu_pid
                 assert client1.succeed("pgrep -x memtouch").strip() == memory_pid
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -Eq 'Write [1-9][0-9]*[.][0-9]+ [MG]iB/s'")
                 stress_command("cpu", "stop")
                 stress_command("memory", "stop")
                 client1.wait_until_succeeds("! pgrep -f '^stress-ng'")
                 client1.wait_until_succeeds("! pgrep -x memtouch")
                 server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>CPU stress</button>'")
+                server.wait_until_succeeds(
+                    "curl --fail --silent http://127.0.0.1:2222/status | grep 'value=\"client1\"' | grep -q '>Memory stress</button>'"
+                )
+                page = server.succeed("curl --fail --silent http://127.0.0.1:2222/status")
+                assert "Process exited with code" not in page
+                assert 'class="stress-bandwidth"' not in page
           '';
       })) {
         inherit system pkgs;
