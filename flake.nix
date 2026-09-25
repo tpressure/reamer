@@ -14,6 +14,7 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
       serverDnsName = "testvm";
+      serverDnsOverrideName = "testvm";
       cloudInitOverrideServerDnsName = "cloud-init-server";
       cloudInitOverrideBuiltInServerHost = "does-not-resolve.invalid";
       numClientVms = 2;
@@ -223,6 +224,12 @@
           format = "raw-efi";
           modules = [ commonModule ] ++ modules;
         };
+
+      exportRawImage = name: filename: image:
+        pkgs.runCommandNoCC name { } ''
+          mkdir -p "$out"
+          ln -s ${image}/nixos.img "$out/${filename}"
+        '';
 
       integrationTest = (import "${pkgs.path}/nixos/tests/make-test-python.nix" ({ ... }: {
         name = "heartbeat-demo-integration";
@@ -436,6 +443,18 @@
             services.heartbeatDemoClient.randomizeHostname = true;
           })
         ];
+        cloud-init-image = mkRawImage [
+          clientModule
+          ({ ... }: {
+            networking.hostName = "";
+            services.cloud-init.enable = true;
+            services.cloud-init.settings.preserve_hostname = true;
+            services.heartbeatDemoClient.enable = true;
+            services.heartbeatDemoClient.serverHost = serverDnsOverrideName;
+            services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds;
+            services.heartbeatDemoClient.randomizeHostname = true;
+          })
+        ];
       };
 
       apps.${system} = {
@@ -460,7 +479,8 @@
         };
       };
 
-      server.raw = self.packages.${system}.server-image;
-      client.raw = self.packages.${system}.client-image;
+      server.raw = exportRawImage "heartbeat-demo-server.raw" "server.raw" self.packages.${system}.server-image;
+      client.raw = exportRawImage "heartbeat-demo-client.raw" "client.raw" self.packages.${system}.client-image;
+      cloud-init.raw = exportRawImage "heartbeat-demo-cloud-init.raw" "cloud-init.raw" self.packages.${system}.cloud-init-image;
     };
 }

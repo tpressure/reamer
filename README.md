@@ -67,19 +67,25 @@ This repo also exposes two UEFI-bootable raw NixOS images through flakes:
 
 - `server.raw`: runs the heartbeat server automatically
 - `client.raw`: runs the heartbeat client automatically
+- `cloud-init.raw`: runs the cloud-init-enabled heartbeat client with a built-in server target from `serverDnsOverrideName`
 
 Build them with:
 
 ```bash
 nix build .#server.raw
 nix build .#client.raw
+nix build .#cloud-init.raw
 ```
 
 The resulting raw images are available at:
 
 ```bash
-./result
+./result/server.raw
+./result/client.raw
+./result/cloud-init.raw
 ```
+
+Each of `server.raw`, `client.raw`, and `cloud-init.raw` builds a small output directory that contains a same-named symlink to the raw disk file.
 
 The generated raw images use the upstream `raw-efi` image format, so they boot via UEFI rather than legacy BIOS.
 
@@ -102,6 +108,14 @@ serverDnsName = "testvm";
 ```
 
 The default client image and the integration test both use that value, so changing it there updates both together.
+
+There is also a dedicated built-in target for the `cloud-init.raw` image:
+
+```nix
+serverDnsOverrideName = "my-server.internal";
+```
+
+That image uses `serverDnsOverrideName` as its built-in `services.heartbeatDemoClient.serverHost` value.
 
 There is also a single place to change how many client VMs the integration test starts:
 
