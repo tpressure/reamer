@@ -1,5 +1,44 @@
 {
   "nodes": {
+    "argparse": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1726837382,
+        "narHash": "sha256-LKbcLX4rrhqNhcJE7/y12GUYa9rRLVt61YfhfeP8x+Q=",
+        "owner": "p-ranav",
+        "repo": "argparse",
+        "rev": "84c02050ea8bd1bf99de0a4943db40235e9fd5e7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "p-ranav",
+        "ref": "master",
+        "repo": "argparse",
+        "type": "github"
+      }
+    },
+    "memtouch": {
+      "inputs": {
+        "argparse": "argparse",
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1788227694,
+        "narHash": "sha256-+neros7OB06Og/zjLCKbOyWYpMzT365usO65zftDuX8=",
+        "owner": "cobaltcore-dev",
+        "repo": "memtouch",
+        "rev": "46f37762c46c08be77cb16dd5fe95e7b348a7e55",
+        "type": "github"
+      },
+      "original": {
+        "owner": "cobaltcore-dev",
+        "repo": "memtouch",
+        "rev": "46f37762c46c08be77cb16dd5fe95e7b348a7e55",
+        "type": "github"
+      }
+    },
     "nixlib": {
       "locked": {
         "lastModified": 1736643958,
@@ -54,6 +93,7 @@
     },
     "root": {
       "inputs": {
+        "memtouch": "memtouch",
         "nixos-generators": "nixos-generators",
         "nixpkgs": "nixpkgs"
       }

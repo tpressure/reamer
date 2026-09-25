@@ -57,9 +57,22 @@ By default, the client connects to `127.0.0.1:12345` and sends a heartbeat every
 
 On Linux, each heartbeat also reports machine-wide CPU and memory usage. CPU usage is the busy percentage across all cores since the previous sample (idle and I/O wait are excluded). The first CPU reading is unavailable until a second sample arrives. Memory usage is `(MemTotal - MemAvailable) / MemTotal`, so reclaimable memory is treated as available. These counters come from Linux's [`/proc` interface](https://docs.kernel.org/filesystems/proc.html); no additional Python packages are needed. Unavailable metrics are sent as `null`, and heartbeats continue on systems without these counters.
 
-Each client has two compact history charts covering the last 60 seconds, with twelve five-second bars on a fixed 0–100% scale. Bars show the average of samples received in that interval; hover for the value. Blank bars mean no samples arrived; hover the latest percentage to see the sample’s age. Sampling follows `--interval` (the Nix VMs default to 0.5 seconds). The server timestamps receipt using its own monotonic clock, retains at most 60 one-second aggregates per client, and expires old samples even after disconnection. History is kept in memory and cleared on reset or server restart. Older clients without metrics still appear normally.
+Each client has two compact history charts covering the last 60 seconds, with fixed five-second intervals on a 0–100% scale. Bars slide left each second; completed bars keep their original averages, and only the newest interval changes while samples arrive. Partial bars are clipped at the edges of the 60-second window. Hover for the interval and value. Blank bars mean no samples arrived; hover the latest percentage to see the sample’s age. Sampling follows `--interval` (the Nix VMs default to 0.5 seconds). The server timestamps receipt using its own monotonic clock, retains at most 64 one-second aggregates per client (keeping the oldest five-second interval intact until its bar leaves the chart), and expires old samples even after disconnection. History is kept in memory and cleared on reset or server restart. Older clients without metrics still appear normally.
 
-The optional heartbeat field is `"metrics": {"cpu_percent": 12.5, "memory_percent": 48.2}`. Each value must be a finite number from 0 to 100; invalid values are ignored independently.
+The optional heartbeat field is `"metrics": {"cpu_percent": 12.5, "memory_percent": 48.2, "vcpu_count": 4, "memory_total_bytes": 8589934592}`. Usage percentages must be finite numbers from 0 to 100; capacities must be positive integers. Invalid values are ignored independently. The status page shows available vCPUs and total usable RAM beneath each client name, using GiB or MiB. Older clients show a dash for capacities they do not report.
+
+### Client stress controls
+
+Each client's status row includes **CPU stress** and **Memory stress** buttons. A running test changes its button to **Stop CPU** or **Stop memory**. Both tests can run independently or together, and the charts continue to update.
+
+- CPU stress runs `stress-ng` at 100% load with one worker for every vCPU available to the client.
+- Memory stress runs [memtouch](https://github.com/cobaltcore-dev/memtouch) with half the available vCPUs (rounded down, at least one worker) and half the VM's total usable RAM. The memory budget is divided among the workers and rounded down to whole MiB per worker. The read/write ratio is 50/50.
+
+The Nix client images include both tools, with memtouch pinned in `flake.lock`. For a manually launched client, install `stress-ng` and `memtouch` on its `PATH`. Failures such as a missing executable or a workload exiting unexpectedly appear beside the controls.
+
+The client owns the stress processes and reports their actual state with every heartbeat. A server restart or connection interruption leaves workloads running; after reconnecting, the server reconstructs the stop controls from the client's report. Commands take effect on the next heartbeat. Stop requests remain queued through a disconnect; unacknowledged start requests expire after 30 seconds. Duplicate commands do not launch duplicate workloads. Resetting the server's client list does not stop running workloads: their state returns with the next heartbeat. Shutting down the client stops its workloads, including child processes.
+
+Stress controls require the updated client and server. Older clients can still send heartbeats, but their controls are disabled. The page uses a per-server form token for control requests; this demo has no authentication, so expose it only on your trusted VM/test network.
 
 Example with explicit settings:
 

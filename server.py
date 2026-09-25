@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import secrets
 import socket
 import threading
 import time
@@ -11,6 +12,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs
 
 DEFAULT_PORT = 12345
 DEFAULT_HTTP_PORT = 8080
@@ -18,7 +20,10 @@ DEFAULT_HEALTHY_THRESHOLD_MS = 5000
 DEFAULT_WARNING_THRESHOLD_MS = 10000
 HISTORY_SECONDS = 60
 HISTOGRAM_BUCKET_SECONDS = 5
+# Keep complete edge buckets while they slide out of the 60-second viewport.
+HISTORY_RETENTION_SECONDS = HISTORY_SECONDS + HISTOGRAM_BUCKET_SECONDS - 1
 METRIC_NAMES = ("cpu_percent", "memory_percent")
+STRESS_KINDS = ("cpu", "memory")
 
 
 class HeartbeatServer:
@@ -39,6 +44,8 @@ class HeartbeatServer:
         self.warning_threshold_ms = warning_threshold_ms
         self.clients = {}
         self.lock = threading.Lock()
+        self.pending_commands = {}
+        self.control_token = secrets.token_urlsafe(32)
 
     def serve_forever(self) -> None:
         if self.enable_http:
@@ -84,11 +91,18 @@ class HeartbeatServer:
                 client_id = message.get("client_id") or peer
                 if not isinstance(client_id, str):
                     continue
-                self.record_heartbeat(client_id, peer, message.get("metrics"))
+                supports_control = message.get("control_protocol") == 1
+                self.record_heartbeat(client_id, peer, message.get("metrics"), message.get("stress"), supports_control)
+                if supports_control:
+                    reply = {"type": "heartbeat_ack", "commands": self.commands_for(client_id)}
+                    try:
+                        conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
+                    except OSError:
+                        break
 
         print(f"Client disconnected: {peer}")
 
-    def record_heartbeat(self, client_id: str, peer: str, metrics: object) -> None:
+    def record_heartbeat(self, client_id: str, peer: str, metrics: object, stress: object = None, supports_control: bool = False) -> None:
         timestamp = datetime.now(timezone.utc)
         second = int(time.monotonic())
         if not isinstance(metrics, dict):
@@ -97,12 +111,21 @@ class HeartbeatServer:
             client = self.clients.setdefault(client_id, {
                 "max_gap_ms": 0,
                 "last_heartbeat": timestamp,
-                "history": deque(maxlen=HISTORY_SECONDS),
+                "history": deque(maxlen=HISTORY_RETENTION_SECONDS),
             })
             client["max_gap_ms"] = max(
                 client["max_gap_ms"], self.get_interval_ms(client["last_heartbeat"], timestamp)
             )
             client.update(address=peer, last_heartbeat=timestamp)
+            for name, maximum in (("vcpu_count", 2**20), ("memory_total_bytes", 2**63 - 1)):
+                value = metrics.get(name)
+                client[name] = value if type(value) is int and 0 < value <= maximum else None
+            client["supports_control"] = supports_control
+            client["stress"] = self.validate_stress(stress)
+            for kind, state in client["stress"].items():
+                pending = self.pending_commands.get((client_id, kind))
+                if pending and pending["id"] == state["last_command"]:
+                    del self.pending_commands[(client_id, kind)]
             history = client["history"]
             self.prune_history(history, second)
             # At most one aggregate per second, even with very fast heartbeats.
@@ -116,8 +139,53 @@ class HeartbeatServer:
             self.print_clients_locked()
 
     @staticmethod
+    def validate_stress(stress: object) -> dict:
+        result = {}
+        for kind in STRESS_KINDS:
+            raw = stress.get(kind, {}) if isinstance(stress, dict) else {}
+            if not isinstance(raw, dict):
+                raw = {}
+            state = raw.get("state")
+            result[kind] = {
+                "state": state if state in ("idle", "running", "error") else "unknown",
+                "last_command": raw.get("last_command", "")[:128] if isinstance(raw.get("last_command", ""), str) else "",
+                "error": raw.get("error", "")[:200] if isinstance(raw.get("error", ""), str) else "",
+            }
+        return result
+
+    def request_stress(self, client_id: str, kind: str, action: str) -> None:
+        if kind not in STRESS_KINDS or action not in ("start", "stop"):
+            raise ValueError("Unknown stress test or action")
+        with self.lock:
+            client = self.clients.get(client_id)
+            if not client or not client.get("supports_control"):
+                raise ValueError("Client is unavailable or needs an upgrade")
+            if action == "start" and self.get_heartbeat_age_ms(client["last_heartbeat"]) > self.warning_threshold_ms:
+                raise ValueError("Wait for the client to reconnect before starting a test")
+            self.pending_commands[(client_id, kind)] = {
+                "id": secrets.token_hex(16), "kind": kind, "action": action, "created": time.monotonic(),
+            }
+            client["control_error"] = ""
+
+    def commands_for(self, client_id: str) -> list[dict]:
+        with self.lock:
+            self.expire_commands_locked()
+            return [
+                {key: command[key] for key in ("id", "kind", "action")}
+                for (target, _), command in self.pending_commands.items() if target == client_id
+            ]
+
+    def expire_commands_locked(self) -> None:
+        for key, command in list(self.pending_commands.items()):
+            if command["action"] == "start" and time.monotonic() - command["created"] > 30:
+                del self.pending_commands[key]
+                if key[0] in self.clients:
+                    self.clients[key[0]]["control_error"] = "Start request expired; try again when the client reconnects."
+
+    @staticmethod
     def prune_history(history: deque, second: int) -> None:
-        while history and history[0]["second"] <= second - HISTORY_SECONDS:
+        first_bucket = ((second + 1 - HISTORY_SECONDS) // HISTOGRAM_BUCKET_SECONDS) * HISTOGRAM_BUCKET_SECONDS
+        while history and history[0]["second"] < first_bucket:
             history.popleft()
 
     def print_clients_locked(self) -> None:
@@ -165,6 +233,28 @@ class HeartbeatServer:
                 self.wfile.write(body)
 
             def do_POST(self) -> None:
+                if self.path == "/stress":
+                    try:
+                        length = int(self.headers.get("Content-Length", "0"))
+                        if not 0 < length <= 4096:
+                            raise ValueError("Invalid request size")
+                        fields = parse_qs(self.rfile.read(length).decode("utf-8"), strict_parsing=True)
+                        token = fields.get("token", [""])[0]
+                        if not secrets.compare_digest(token.encode("utf-8"), server.control_token.encode("ascii")):
+                            self.send_error(403, "Reload the page before sending a command")
+                            return
+                        server.request_stress(fields.get("client_id", [""])[0], fields.get("kind", [""])[0], fields.get("action", [""])[0])
+                    except (ValueError, UnicodeError) as exc:
+                        self.send_error(400, str(exc))
+                        return
+                    if self.headers.get("X-Requested-With") == "fetch":
+                        self.send_response(204)
+                    else:
+                        self.send_response(303)
+                        self.send_header("Location", "/")
+                    self.end_headers()
+                    return
+
                 if self.path != "/reset":
                     self.send_error(404, "Not Found")
                     return
@@ -212,7 +302,8 @@ class HeartbeatServer:
             rows.append(
                 f"<tr class=\"{status['css_class']}\">"
                 f'<td><span class="status-badge {status["css_class"]}">{escape(status["label"])}</span></td>'
-                f'<th scope="row" class="client-id">{escape(client["client_id"])}</th>'
+                f'<th scope="row" class="client-id">{escape(client["client_id"])}'
+                f'<span class="client-capacity" title="Available vCPUs and total usable RAM reported by the client">{self.format_capacity(client)}</span></th>'
                 f'<td class="mono">{escape(client["address"])}</td>'
                 f'<td class="timestamp">{escape(self.format_timestamp(client["last_heartbeat"]))}</td>'
                 f'<td class="numeric">{age_ms} <span class="unit">ms</span></td>'
@@ -223,6 +314,7 @@ class HeartbeatServer:
                 '<tr class="history-row"><td colspan="6"><div class="client-history">'
                 + self.render_histogram(client["history"], "cpu_percent", "CPU", second)
                 + self.render_histogram(client["history"], "memory_percent", "Memory", second)
+                + self.render_stress_controls(client, age_ms)
                 + '</div></td></tr>'
             )
 
@@ -343,11 +435,20 @@ class HeartbeatServer:
     .history-heading {{ display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 11px; }}
     .history-heading strong {{ color: var(--muted); font-weight: 500; }}
     .history-reading {{ color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }}
-    .history-bars {{ display: grid; grid-template-columns: repeat(12, 1fr); gap: 2px; height: 22px; border-bottom: 1px solid var(--border); }}
-    .history-bar {{ display: flex; align-items: end; }}
+    .history-bars {{ position: relative; overflow: hidden; height: 22px; border-bottom: 1px solid var(--border); }}
+    .history-bar {{ position: absolute; bottom: 0; height: 100%; width: calc(100% / 12 - 2px); display: flex; align-items: end; }}
     .history-bar i {{ display: block; width: 100%; min-height: 1px; background: var(--chart-color); opacity: 0.65; border-radius: 1px 1px 0 0; }}
     .history-bar:hover i {{ opacity: 1; }}
+    .stress-controls {{ display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-left: auto; }}
+    .stress-button {{ padding: 5px 9px; border: 1px solid #435164; border-radius: 5px; background: transparent; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; white-space: nowrap; }}
+    .stress-button:hover:not(:disabled) {{ color: var(--text); border-color: #71c7ff; }}
+    .stress-button.running {{ color: var(--warning); border-color: #6a5531; }}
+    .stress-button:disabled, .stress-button[aria-disabled="true"] {{ opacity: 0.5; cursor: default; }}
+    .stress-error, .control-feedback {{ color: var(--stale); font-size: 11px; white-space: normal; }}
+    .stress-error {{ flex-basis: 100%; max-width: 440px; }}
+    .control-feedback:empty {{ display: none; }}
     .client-id {{ font-weight: 600; white-space: normal; overflow-wrap: anywhere; min-width: 120px; max-width: 280px; }}
+    .client-capacity {{ display: block; margin-top: 3px; color: var(--muted); font-size: 11px; font-weight: 400; white-space: nowrap; }}
     .status-badge {{ display: inline-block; border: 1px solid currentColor; border-radius: 6px; padding: 3px 8px; color: var(--status-color); font-size: 11px; font-weight: 600; }}
     .mono, .numeric {{ font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }}
     .mono, .timestamp {{ color: var(--muted); }}
@@ -374,6 +475,7 @@ class HeartbeatServer:
       .client-history {{ width: calc(100vw - 66px); gap: 8px; }}
       .history-chart {{ grid-template-columns: 100px minmax(0, 1fr); width: 100%; }}
       .summary-status {{ flex-shrink: 0; font-size: 11px; white-space: nowrap; }}
+      .stress-controls {{ margin-left: 0; }}
     }}
   </style>
 </head>
@@ -392,6 +494,7 @@ class HeartbeatServer:
         <button type="submit" class="reset-button">Reset Clients</button>
       </form>
     </header>
+    <p id="control-feedback" class="control-feedback" role="status"></p>
     <noscript><p class="subtitle">JavaScript is disabled. Reload this page to update client status.</p></noscript>
     {self.render_status_content()}
     <footer class="page-footer">
@@ -405,6 +508,32 @@ class HeartbeatServer:
   </main>
   <script>
     const refreshNote = document.getElementById("refresh-note");
+    document.addEventListener("submit", async event => {{
+      const form = event.target;
+      if (!form.matches(".stress-form")) return;
+      event.preventDefault();
+      const button = form.querySelector("button");
+      if (button.getAttribute("aria-disabled") === "true") return;
+      const feedback = document.getElementById("control-feedback");
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      button.setAttribute("aria-disabled", "true");
+      feedback.textContent = "";
+      try {{
+        const response = await fetch("/stress", {{
+          method: "POST", body: new URLSearchParams(new FormData(form)),
+          headers: {{"X-Requested-With": "fetch"}}, signal: controller.signal,
+        }});
+        if (!response.ok) throw new Error(response.status === 403
+          ? "The server restarted. Wait for the next update and try again."
+          : "Could not send the stress command. Check the client connection and try again.");
+      }} catch (error) {{
+        feedback.textContent = error.message;
+      }} finally {{
+        clearTimeout(timeout);
+        button.removeAttribute("aria-disabled");
+      }}
+    }});
     async function refreshStatus() {{
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
@@ -422,6 +551,8 @@ class HeartbeatServer:
         if (!table || replacements.some(element => !element)) {{
           throw new Error("Invalid status response");
         }}
+        const focusedForm = document.activeElement.closest(".stress-form");
+        const focusedControl = focusedForm ? [focusedForm.elements.client_id.value, focusedForm.elements.kind.value] : null;
         selectors.forEach((selector, index) => {{
           const current = document.querySelector(selector);
           const next = replacements[index];
@@ -431,6 +562,11 @@ class HeartbeatServer:
           }}
         }});
         document.querySelector(".table-wrap").className = table.className;
+        if (focusedControl) {{
+          const form = Array.from(document.querySelectorAll(".stress-form")).find(form =>
+            form.elements.client_id.value === focusedControl[0] && form.elements.kind.value === focusedControl[1]);
+          if (form) form.querySelector("button").focus({{preventScroll: true}});
+        }}
         refreshNote.textContent = "Auto-refresh · every second";
       }} catch (error) {{
         refreshNote.textContent = "Updates interrupted · retrying…";
@@ -447,17 +583,73 @@ class HeartbeatServer:
 """
 
     @staticmethod
+    def format_capacity(client: dict) -> str:
+        cpus = client.get("vcpu_count")
+        memory = client.get("memory_total_bytes")
+        cpu_label = f"{cpus} vCPU{'s' if cpus != 1 else ''}" if cpus is not None else "vCPUs —"
+        if memory is None:
+            memory_label = "RAM —"
+        elif memory >= 1024**3:
+            memory_label = f"{memory / 1024**3:.1f} GiB RAM"
+        else:
+            memory_label = f"{memory / 1024**2:.0f} MiB RAM"
+        return f"{cpu_label} · {memory_label}"
+
+    def render_stress_controls(self, client: dict, age_ms: int) -> str:
+        forms = []
+        for kind, label in (("cpu", "CPU"), ("memory", "memory")):
+            state = client["stress"].get(kind, {})
+            pending = client["pending"].get(kind, {})
+            running = state.get("state") == "running" or pending.get("action") == "start"
+            action = "stop" if running else "start"
+            text = f"Stop {label}" if running else f"{label.capitalize() if kind == 'memory' else label} stress"
+            title = "Use all available vCPUs" if kind == "cpu" else "Use half the vCPUs and half the total VM memory"
+            disabled = not client["supports_control"] or (action == "start" and age_ms > self.warning_threshold_ms)
+            if not client["supports_control"]:
+                title = "Upgrade this client to enable stress controls"
+            elif pending.get("action") == "stop":
+                text, title, disabled = f"Stopping {label}…", "Waiting for the client to confirm", False
+            elif pending.get("action") == "start":
+                text, title = f"Cancel {label}", "Start requested; click to cancel or stop"
+            elif running:
+                title = f"Stop the running {label} test"
+            elif state.get("state") == "error":
+                text, title = f"Retry {label}", state.get("error", "Stress test failed")
+            pending_attribute = ' aria-disabled="true"' if pending.get("action") == "stop" else ""
+            forms.append(
+                '<form class="stress-form" method="post" action="/stress">'
+                f'<input type="hidden" name="token" value="{self.control_token}">'
+                f'<input type="hidden" name="client_id" value="{escape(client["client_id"], quote=True)}">'
+                f'<input type="hidden" name="kind" value="{kind}">'
+                f'<input type="hidden" name="action" value="{action}">'
+                f'<button class="stress-button{" running" if running else ""}" type="submit" '
+                f'title="{escape(title, quote=True)}"{" disabled" if disabled else ""}'
+                f'{pending_attribute}>{text}</button></form>'
+            )
+        errors = [state["error"] for state in client["stress"].values() if state.get("error")]
+        if client["control_error"]:
+            errors.append(client["control_error"])
+        if errors:
+            forms.append(f'<span class="stress-error">{escape(" · ".join(errors))}</span>')
+        return '<div class="stress-controls">' + "".join(forms) + '</div>'
+
+    @staticmethod
     def render_histogram(history: list[dict], name: str, label: str, second: int) -> str:
-        buckets = [[0, 0] for _ in range(HISTORY_SECONDS // HISTOGRAM_BUCKET_SECONDS)]
+        window_end = second + 1
+        window_start = window_end - HISTORY_SECONDS
+        first_bucket = (window_start // HISTOGRAM_BUCKET_SECONDS) * HISTOGRAM_BUCKET_SECONDS
+        last_bucket = (second // HISTOGRAM_BUCKET_SECONDS) * HISTOGRAM_BUCKET_SECONDS
+        buckets = {start: [0, 0] for start in range(first_bucket, last_bucket + 1, HISTOGRAM_BUCKET_SECONDS)}
         latest = None
         for sample in history:
-            offset = sample["second"] - (second - HISTORY_SECONDS + 1)
-            if 0 <= offset < HISTORY_SECONDS and name in sample:
+            bucket_start = (sample["second"] // HISTOGRAM_BUCKET_SECONDS) * HISTOGRAM_BUCKET_SECONDS
+            if bucket_start in buckets and sample["second"] <= second and name in sample:
                 total, count = sample[name]
-                bucket = buckets[offset // HISTOGRAM_BUCKET_SECONDS]
+                bucket = buckets[bucket_start]
                 bucket[0] += total
                 bucket[1] += count
-                latest = (total / count, second - sample["second"])
+                if sample["second"] >= window_start:
+                    latest = (total / count, second - sample["second"])
 
         reading = "No samples"
         display_value = "—"
@@ -466,10 +658,12 @@ class HeartbeatServer:
             reading = f"{value:.1f}% · {age}s ago"
             display_value = f"{value:.1f}%"
         bars = []
-        for index, (total, count) in enumerate(buckets):
-            end = HISTORY_SECONDS - index * HISTOGRAM_BUCKET_SECONDS
-            start = end - HISTOGRAM_BUCKET_SECONDS
+        for bucket_start, (total, count) in buckets.items():
+            end = window_end - bucket_start
+            start = max(0, end - HISTOGRAM_BUCKET_SECONDS)
             description = f"{start}–{end}s ago: "
+            if bucket_start == last_bucket and window_end % HISTOGRAM_BUCKET_SECONDS:
+                description += "current interval, still collecting; "
             fill = ""
             if count:
                 value = total / count
@@ -477,7 +671,11 @@ class HeartbeatServer:
                 fill = f'<i style="height: {value:.2f}%"></i>'
             else:
                 description += "no samples"
-            bars.append(f'<span class="history-bar" title="{description}">{fill}</span>')
+            left = 100 * (bucket_start - window_start) / HISTORY_SECONDS
+            bars.append(
+                f'<span class="history-bar" data-bucket="{bucket_start}" '
+                f'style="left: calc({left:.4f}% + 1px)" title="{description}">{fill}</span>'
+            )
 
         return (
             f'<div class="history-chart {name}">'
@@ -485,6 +683,7 @@ class HeartbeatServer:
             f'<span class="history-reading" title="{reading}">{display_value}</span></div>'
             f'<div class="history-bars" role="img" aria-label="{label} usage over the last 60 seconds; '
             f'five-second averages on a 0 to 100 percent scale. Latest: {reading}. '
+            'Completed bars keep their values as they move left; only the current interval is still collecting. '
             'Empty bars indicate missing samples.">'
             + "".join(bars)
             + '</div></div>'
@@ -494,6 +693,7 @@ class HeartbeatServer:
         if second is None:
             second = int(time.monotonic())
         with self.lock:
+            self.expire_commands_locked()
             for client in self.clients.values():
                 self.prune_history(client.get("history", deque()), second)
             return [
@@ -502,7 +702,13 @@ class HeartbeatServer:
                     "address": client["address"],
                     "last_heartbeat": client["last_heartbeat"],
                     "max_gap_ms": client["max_gap_ms"],
+                    "vcpu_count": client.get("vcpu_count"),
+                    "memory_total_bytes": client.get("memory_total_bytes"),
                     "history": [dict(sample) for sample in client.get("history", [])],
+                    "supports_control": client.get("supports_control", False),
+                    "stress": {kind: dict(state) for kind, state in client.get("stress", {}).items()},
+                    "pending": {kind: dict(command) for (target, kind), command in self.pending_commands.items() if target == client_id},
+                    "control_error": client.get("control_error", ""),
                 }
                 for client_id, client in sorted(self.clients.items())
             ]
@@ -510,6 +716,7 @@ class HeartbeatServer:
     def clear_clients(self) -> None:
         with self.lock:
             self.clients.clear()
+            self.pending_commands.clear()
         print("Cleared all clients via HTTP reset.")
 
     @staticmethod

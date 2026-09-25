@@ -7,9 +7,13 @@
       url = "github:nix-community/nixos-generators";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    memtouch = {
+      url = "github:cobaltcore-dev/memtouch/46f37762c46c08be77cb16dd5fe95e7b348a7e55";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, nixos-generators }:
+  outputs = { self, nixpkgs, nixos-generators, memtouch }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
@@ -18,8 +22,15 @@
       cloudInitOverrideServerDnsName = "cloud-init-server";
       cloudInitOverrideBuiltInServerHost = "does-not-resolve.invalid";
       numClientVms = 2;
-      heartbeatIntervalSeconds = 0.5;
+      heartbeatIntervalSeconds = 0.1;
       lib = pkgs.lib;
+      memtouchPackage = memtouch.packages.${system}.default.overrideAttrs (old: {
+        nativeBuildInputs = [ pkgs.meson pkgs.ninja ];
+        # VM images must not inherit the build host's CPU instruction set.
+        postPatch = (old.postPatch or "") + ''
+          substituteInPlace meson.build --replace-fail "'-march=native'," ""
+        '';
+      });
       clientNodeNames = builtins.genList (i: "client${toString (i + 1)}") numClientVms;
       cloudInitOverrideMetadata = pkgs.stdenv.mkDerivation {
         name = "heartbeat-demo-cloud-init-override-metadata";
@@ -203,6 +214,7 @@
               wantedBy = [ "multi-user.target" ];
               after = [ "network-online.target" ] ++ lib.optional config.services.cloud-init.enable "cloud-final.service";
               wants = [ "network-online.target" ] ++ lib.optional config.services.cloud-init.enable "cloud-final.service";
+              path = [ pkgs.stress-ng memtouchPackage ];
 
               serviceConfig = {
                 ExecStart = pkgs.writeShellScript "heartbeat-demo-client-start" ''
@@ -266,6 +278,7 @@
 
               system.name = clientName;
               networking.hostName = clientName;
+              virtualisation.cores = 2;
               services.heartbeatDemoClient.enable = true;
               services.heartbeatDemoClient.serverHost = serverDnsName;
               services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds;
@@ -298,13 +311,66 @@
             server.wait_until_succeeds(
                 "curl --fail --silent http://127.0.0.1:2222/status | grep -Eq 'Memory [0-9]+[.][0-9]+% average'"
             )
+            server.wait_until_succeeds(
+                "curl --fail --silent http://127.0.0.1:2222/status | grep -Eq '2 vCPUs.*[GM]iB RAM'"
+            )
           ''
           + "\n"
           + lib.concatMapStringsSep "\n" (clientName: ''
             server.wait_until_succeeds(
                 "curl --fail --silent http://127.0.0.1:2222/ | grep -q '${clientName}'"
             )
-          '') clientNodeNames;
+          '') clientNodeNames
+          + lib.optionalString (numClientVms > 0) ''
+
+            import re
+
+            def stress_command(kind, action):
+                page = server.succeed("curl --fail --silent http://127.0.0.1:2222/")
+                match = re.search(r'name="token" value="([^"]+)"', page)
+                assert match is not None
+                token = match.group(1)
+                server.succeed(
+                    "curl --fail --silent -X POST http://127.0.0.1:2222/stress "
+                    f"--data-urlencode token={token} --data-urlencode client_id=client1 "
+                    f"--data-urlencode kind={kind} --data-urlencode action={action}"
+                )
+
+            with subtest("Stress controls reject requests without a page token"):
+                code = server.succeed(
+                    "curl --silent -o /dev/null -w '%{http_code}' -X POST "
+                    "http://127.0.0.1:2222/stress -d 'client_id=client1&kind=cpu&action=start'"
+                )
+                assert code == "403"
+
+            with subtest("Run both stress tests on client1"):
+                stress_command("cpu", "start")
+                client1.wait_until_succeeds("pgrep -x stress-ng")
+                cpu_pid = client1.succeed("pgrep -x stress-ng").strip()
+                client1.succeed(f"ps -p {cpu_pid} -o args= | grep -- '--cpu 2 --cpu-load 100'")
+                stress_command("memory", "start")
+                client1.wait_until_succeeds("pgrep -x memtouch")
+                memory_pid = client1.succeed("pgrep -x memtouch").strip()
+                client1.succeed(f"ps -p {memory_pid} -o args= | grep -- '--num_threads 1'")
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>Stop CPU</button>'")
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>Stop memory</button>'")
+                for other_client in [${lib.concatStringsSep ", " (lib.drop 1 clientNodeNames)}]:
+                    other_client.fail("pgrep -x stress-ng")
+                    other_client.fail("pgrep -x memtouch")
+
+            with subtest("Server restart recovers running tests and allows abort"):
+                server.succeed("systemctl restart heartbeat-demo-server.service")
+                server.wait_for_open_port(2222)
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>Stop CPU</button>'")
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>Stop memory</button>'")
+                assert client1.succeed("pgrep -x stress-ng").strip() == cpu_pid
+                assert client1.succeed("pgrep -x memtouch").strip() == memory_pid
+                stress_command("cpu", "stop")
+                stress_command("memory", "stop")
+                client1.wait_until_succeeds("! pgrep -f '^stress-ng'")
+                client1.wait_until_succeeds("! pgrep -x memtouch")
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>CPU stress</button>'")
+          '';
       })) {
         inherit system pkgs;
       };
@@ -429,6 +495,7 @@
       packages.${system} = {
         default = heartbeatDemo;
         heartbeat-demo = heartbeatDemo;
+        memtouch = memtouchPackage;
         integration-test = integrationTest;
         integration-cloud-init-override-test = cloudInitOverrideIntegrationTest;
         integration-cloud-init-missing-cdrom-test = cloudInitMissingCdromIntegrationTest;
