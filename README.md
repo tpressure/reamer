@@ -35,7 +35,7 @@ To use a different HTTP port:
 python3 server.py --enable-http --http-port 9001
 ```
 
-The status page shows summary counts and compact green, yellow, or red status badges based on heartbeat age, with clients needing attention listed first. It updates the counts and client table every second without reloading the page (preserving the logo and table scroll position), and uses a small, cached logo thumbnail (about 5 KB) derived from `reamer-logo.png`, with no external fonts, scripts, or stylesheets. The `static/` directory must stay alongside `server.py` when deploying manually; the Nix package includes it automatically. By default:
+The status page shows summary counts and compact green, yellow, or red status badges based on heartbeat age, with clients needing attention listed first. It updates the counts and client table every second without reloading the page (preserving the logo and table scroll position), and uses a small, cached logo thumbnail (about 5 KB) derived from `reamer-logo.png`, with no external fonts, scripts, or stylesheets. The `static/` directory and `reamer-logo.png` must stay alongside `server.py` when deploying manually; the Nix package includes it automatically. By default:
 
 - green: heartbeat age up to `5000` ms
 - yellow: heartbeat age up to `10000` ms
@@ -81,6 +81,16 @@ Example with explicit settings:
 ```bash
 python3 client.py --host 127.0.0.1 --port 12345 --client-id client-a --interval 2
 ```
+
+Click the Reamer logo to open the About overlay, showing a larger logo and `Reamer 0.9-<git hash>`. Close it with Escape, the close button, or a click outside. Nix embeds the build revision; source checkouts use their local Git revision. The large logo loads only when the overlay is opened.
+
+## Statistics tab
+
+The status page opens on **Overview**, a compact grid with one square per client VM: green for healthy heartbeats, yellow for warning, and red for stale. Client labels use the VM UUID when available, falling back to the hostname otherwise, throughout Overview, Details, and Statistics. Squares stay ordered by their displayed identifier as their colors update. Hover or focus a square to identify the VM; select it to open its row in **Details**, which contains the previous overview, resource charts, and stress controls.
+
+Select **Statistics** for three charts: migration downtime, CPU usage, and memory usage. Choose **All VMs** or a single VM using the selector; selecting a VM in the summary table also focuses the chart. The table always keeps all known VMs visible, sorted by latest downtime, highest first, with node, last/min/average/max downtime, migration count, and current CPU/memory usage.
+
+Migration points use their completion timestamps and retain individual values, with exact details available on hover, click, or keyboard focus. The chart shows the latest 200 events for the selected scope; table summaries include all stored migration events. CPU and memory charts use the existing 60-second history. For all VMs, the line is the average across VMs with a sample in that second and the shaded band is their minimum–maximum range. Missing samples remain gaps. Usage is not stored beyond that window. The Statistics tab refreshes every two seconds and preserves the selected VM and metric.
 
 ## Compute-node migration reporting
 
@@ -175,7 +185,7 @@ That image uses `serverDnsOverrideName` as its built-in `services.heartbeatDemoC
 There is also a single place to change how many client VMs the integration test starts:
 
 ```nix
-numClientVms = 2;
+numClientVms = 6;
 ```
 
 And there is a single place to change the heartbeat interval used by the default client image and the integration test clients:
@@ -248,10 +258,18 @@ write_files:
 
 ## NixOS Integration Test
 
-The flake also defines a 3-node NixOS integration test:
+The flake also defines a 7-node NixOS integration test by default:
 
 - `testvm`: runs the server VM, with hostname and optional domain taken from `serverDnsName`
 - `client1` ... `clientN`: runs the clients, with the count taken from `numClientVms`
+
+The default six clients have distinct VM UUIDs. Five have multiple migration events
+(5, 4, 2, 3, and 4 events respectively); the sixth has no migrations. Two compute
+reporters discover their logs and report migrations in both directions. The test
+checks each VM's last/min/average/max downtime, placement, chronological history,
+and filtering while retaining the full fleet overview, including after a server
+restart. Run `run_tests()` in the interactive driver to populate this scenario
+for review on the status page.
 
 Run the test as a standard flake check with:
 

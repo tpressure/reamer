@@ -41,7 +41,20 @@ class MigrationStore:
                 vm_uuid TEXT, node TEXT, instance TEXT, active_at TEXT, ended_at TEXT,
                 PRIMARY KEY(vm_uuid, node));
             CREATE TABLE IF NOT EXISTS nodes (node TEXT PRIMARY KEY, seen REAL);
+            CREATE INDEX IF NOT EXISTS migrations_time ON migrations(at DESC);
         ''')
+
+    def identities(self):
+        with self.lock:
+            return [row[0] for row in self.db.execute('SELECT vm_uuid FROM migrations UNION SELECT vm_uuid FROM placements')]
+
+    def history(self, identity=None, limit=200):
+        with self.lock:
+            if identity is None:
+                rows = self.db.execute('SELECT vm_uuid, at, downtime_ms FROM migrations ORDER BY at DESC, vm_uuid LIMIT ?', (limit,)).fetchall()
+            else:
+                rows = self.db.execute('SELECT vm_uuid, at, downtime_ms FROM migrations WHERE vm_uuid = ? ORDER BY at DESC LIMIT ?', (identity, limit)).fetchall()
+        return [dict(zip(('vm_uuid', 'at', 'downtime_ms'), row)) for row in reversed(rows)]
 
     def ingest(self, report):
         if not isinstance(report, dict):

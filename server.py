@@ -5,15 +5,17 @@ import json
 import math
 import secrets
 import socket
+import subprocess
 import threading
 import time
 from collections import deque
 from hashlib import sha256
+from functools import lru_cache
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 from migrations import MigrationStore, vm_identity
 
 DEFAULT_PORT = 12345
@@ -26,6 +28,23 @@ HISTOGRAM_BUCKET_SECONDS = 5
 HISTORY_RETENTION_SECONDS = HISTORY_SECONDS + HISTOGRAM_BUCKET_SECONDS - 1
 METRIC_NAMES = ("cpu_percent", "memory_percent")
 STRESS_KINDS = ("cpu", "memory")
+
+
+@lru_cache(maxsize=1)
+def reamer_version() -> str:
+    root = Path(__file__).resolve().parent
+    try:
+        return (root / "VERSION").read_text().strip()
+    except FileNotFoundError:
+        # Source checkouts get their revision locally; Nix embeds it at build time.
+        try:
+            revision = subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "--short=7", "HEAD"],
+                stderr=subprocess.DEVNULL, text=True, timeout=2,
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            revision = "unknown"
+        return "0.9-" + revision
 
 
 class HeartbeatServer:
@@ -219,17 +238,40 @@ class HeartbeatServer:
 
         class StatusHandler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
-                if self.path == "/static/reamer-logo.webp":
-                    not_modified = self.headers.get("If-None-Match") == logo_etag
+                if self.path in ('/static/statistics.js', '/static/statistics.css'):
+                    asset = Path(__file__).resolve().parent / self.path.lstrip('/')
+                    body = asset.read_bytes()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/javascript' if asset.suffix == '.js' else 'text/css')
+                    self.send_header('Cache-Control', 'no-cache')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if urlsplit(self.path).path == '/statistics':
+                    selected = parse_qs(urlsplit(self.path).query).get('vm', [None])[0]
+                    body = json.dumps(server.statistics_data(selected), allow_nan=False).encode()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path in ("/static/reamer-logo.webp", "/static/reamer-logo.png"):
+                    large = self.path.endswith('.png')
+                    image = (Path(__file__).resolve().parent / "reamer-logo.png").read_bytes() if large else logo
+                    etag = f'"{sha256(image).hexdigest()}"' if large else logo_etag
+                    not_modified = self.headers.get("If-None-Match") == etag
                     self.send_response(304 if not_modified else 200)
                     self.send_header("Cache-Control", "public, max-age=86400")
-                    self.send_header("ETag", logo_etag)
+                    self.send_header("ETag", etag)
                     if not not_modified:
-                        self.send_header("Content-Type", "image/webp")
-                        self.send_header("Content-Length", str(len(logo)))
+                        self.send_header("Content-Type", "image/png" if large else "image/webp")
+                        self.send_header("Content-Length", str(len(image)))
                     self.end_headers()
                     if not not_modified:
-                        self.wfile.write(logo)
+                        self.wfile.write(image)
                     return
 
                 if self.path not in ("/", "/status"):
@@ -302,7 +344,11 @@ class HeartbeatServer:
         thread.start()
         print(f"HTTP status page enabled on http://{self.host}:{self.http_port}/")
 
-    def render_status_content(self) -> str:
+    @staticmethod
+    def client_display_id(client) -> str:
+        return client.get("vm_uuid") or client["client_id"]
+
+    def render_status_content(self, view="all") -> str:
         second = int(time.monotonic())
         clients = self.get_clients_snapshot(second)
         total_clients = len(clients)
@@ -312,7 +358,7 @@ class HeartbeatServer:
             status = self.get_client_status(age_ms)
             ordered_clients.append((self.get_status_priority(status["css_class"]), client, age_ms, status))
 
-        ordered_clients.sort(key=lambda item: (item[0], item[1]["client_id"]))
+        ordered_clients.sort(key=lambda item: (item[0], self.client_display_id(item[1])))
         summary_status_class = self.get_summary_status_class(ordered_clients)
         counts = {"status-healthy": 0, "status-warning": 0, "status-stale": 0}
         for _, _, _, status in ordered_clients:
@@ -326,13 +372,35 @@ class HeartbeatServer:
             summary_status_class = "status-empty"
             summary_label = "Waiting for heartbeats"
 
+        squares = []
+        # Positions follow names, never health: a delayed VM must not jump around.
+        for _, client, age_ms, status in sorted(ordered_clients, key=lambda item: self.client_display_id(item[1])):
+            name = escape(client["client_id"])
+            label = escape(f'{self.client_display_id(client)} · {status["label"]} · View details')
+            squares.append(f'<button type="button" class="vm-square {status["css_class"]}" '
+                           f'data-client-id="{name}" aria-label="{label}" title="{label}"></button>')
+        grid = f'''
+      <div id="fleet-overview" class="fleet-card">
+        <div class="section-heading"><h2>Virtual machines <span class="fleet-total">{total_clients}</span></h2>
+          <span class="fleet-health {summary_status_class}">{summary_label}</span></div>
+        <div class="vm-matrix" role="group" aria-label="VM heartbeat health">{''.join(squares)}</div>
+        <p class="fleet-empty" {'hidden' if clients else ''}>No VMs yet. Squares appear when clients send their first heartbeat.</p>
+        <div class="fleet-legend" aria-label="Heartbeat health legend">
+          <span class="status-healthy"><i></i>{counts['status-healthy']} healthy</span>
+          <span class="status-warning"><i></i>{counts['status-warning']} warning</span>
+          <span class="status-stale"><i></i>{counts['status-stale']} stale</span>
+        </div>
+      </div>'''
+        if view == "overview":
+            return grid
+
         rows = []
         for _, client, age_ms, status in ordered_clients:
             max_gap_ms = max(client["max_gap_ms"], age_ms)
             rows.append(
-                f"<tr class=\"{status['css_class']}\">"
+                f'<tr class="{status["css_class"]}" data-client-id="{escape(client["client_id"])}" tabindex="-1">'
                 f'<td><span class="status-badge {status["css_class"]}">{escape(status["label"])}</span></td>'
-                f'<th scope="row" class="client-id">{escape(client["client_id"])}'
+                f'<th scope="row" class="client-id">{escape(self.client_display_id(client))}'
                 f'<span class="client-capacity" title="Available vCPUs and total usable RAM reported by the client">{self.format_capacity(client)}</span></th>'
                 f'<td class="mono">{escape(client["address"])}</td>'
                 f'<td class="timestamp">{escape(self.format_timestamp(client["last_heartbeat"]))}</td>'
@@ -360,7 +428,7 @@ class HeartbeatServer:
 
         table_rows = "\n".join(rows)
 
-        return f'''
+        details = f'''
     <section class="overview" aria-label="Client summary">
       <div class="metric" aria-label="Total Clients: {total_clients}">
         <span class="metric-label">Total clients</span>
@@ -401,8 +469,46 @@ class HeartbeatServer:
           </tbody>
         </table>
       </div>
-    </section>
+</section>
 '''
+
+        return details if view == "details" else grid + details
+
+    def statistics_data(self, selected=None) -> dict:
+        second = int(time.monotonic())
+        now = time.time()
+        clients = self.get_clients_snapshot(second)
+        vms = {identity: {'id': identity, 'vm_uuid': identity, 'name': identity, 'client': None}
+               for identity in self.migrations.identities()}
+        # UUIDs join compute reports to guests and collapse old guest hostnames.
+        for client in sorted(clients, key=lambda item: item['last_heartbeat']):
+            identity = client.get('vm_uuid')
+            key = identity or 'client:' + client['client_id']
+            vms[key] = {'id': key, 'vm_uuid': identity, 'name': self.client_display_id(client), 'client': client}
+        for vm in vms.values():
+            client = vm.pop('client')
+            stats = self.migrations.summary(vm['vm_uuid'])
+            vm['migration'] = stats
+            vm['connected'] = bool(client and self.get_heartbeat_age_ms(client['last_heartbeat']) <= self.warning_threshold_ms)
+            vm['history'] = []
+            vm['cpu_percent'] = vm['memory_percent'] = None
+            if client:
+                for sample in client['history']:
+                    age = second - sample['second']
+                    if not 0 <= age < HISTORY_SECONDS:
+                        continue
+                    reading = {'at': now - age}
+                    for name in METRIC_NAMES:
+                        if name in sample:
+                            total, count = sample[name]
+                            reading[name] = round(total / count, 2)
+                            if age <= 10 and vm['connected']:
+                                vm[name] = reading[name]
+                    vm['history'].append(reading)
+        selected = selected if selected in vms else None
+        identity = vms[selected]['vm_uuid'] if selected else None
+        events = self.migrations.history(identity) if not selected or identity else []
+        return {'now': now, 'selected': selected, 'vms': list(vms.values()), 'events': events}
 
     def render_status_page(self) -> str:
         return f"""<!DOCTYPE html>
@@ -411,6 +517,8 @@ class HeartbeatServer:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Reamer · Heartbeat Status</title>
+  <link rel="stylesheet" href="/static/statistics.css">
+  <script src="/static/statistics.js" defer></script>
   <style>
     :root {{
       color-scheme: dark;
@@ -521,9 +629,27 @@ class HeartbeatServer:
 <body>
   <main>
     <div class="brand-bar">
-      <img class="logo" src="/static/reamer-logo.webp" alt="Reamer" width="176" height="64">
+      <button id="about-open" class="logo-button" type="button" aria-label="About Reamer" aria-haspopup="dialog">
+        <img class="logo" src="/static/reamer-logo.webp" alt="Reamer" width="176" height="64">
+      </button>
       <span class="refresh-note" id="refresh-note" role="status">Auto-refresh · every second</span>
     </div>
+    <nav class="page-tabs" role="tablist" aria-label="Status views">
+      <button id="overview-tab" role="tab" aria-selected="true" aria-controls="overview-panel" type="button">Overview</button>
+      <button id="details-tab" role="tab" aria-selected="false" aria-controls="details-panel" tabindex="-1" type="button">Details</button>
+      <button id="statistic-tab" role="tab" aria-selected="false" aria-controls="statistic-panel" tabindex="-1" type="button">Statistics</button>
+    </nav>
+    <section id="overview-panel" role="tabpanel" aria-labelledby="overview-tab">
+      <header class="page-header"><div><h1>Fleet overview</h1><p class="subtitle">One square per VM. Live heartbeat health at a glance.</p></div></header>
+      {self.render_status_content("overview")}
+      <p id="vm-reading" class="subtitle vm-reading">Hover or focus a square to identify a VM. Select it to open Details.</p>
+      <footer class="page-footer"><div class="thresholds" aria-label="Heartbeat age thresholds">
+        <span>Healthy ≤ {self.healthy_threshold_ms} ms</span>
+        <span>Warning ≤ {self.warning_threshold_ms} ms</span>
+        <span>Stale &gt; {self.warning_threshold_ms} ms</span>
+      </div></footer>
+    </section>
+    <section id="details-panel" role="tabpanel" aria-labelledby="details-tab" hidden>
     <header class="page-header">
       <div>
         <h1>Heartbeat status</h1>
@@ -536,7 +662,7 @@ class HeartbeatServer:
     <p id="control-feedback" class="control-feedback" role="status"></p>
     <label class="migration-toggle"><input id="migration-toggle" type="checkbox">Show migration details</label>
     <noscript><p class="subtitle">JavaScript is disabled. Reload this page to update client status.</p></noscript>
-    {self.render_status_content()}
+    {self.render_status_content("details")}
     <footer class="page-footer">
       <div class="thresholds" aria-label="Heartbeat age thresholds">
         <span>Healthy ≤ {self.healthy_threshold_ms} ms</span>
@@ -545,7 +671,33 @@ class HeartbeatServer:
       </div>
       <span>Clients needing attention appear first</span>
     </footer>
+    </section>
+    <section id="statistic-panel" role="tabpanel" aria-labelledby="statistic-tab" hidden>
+      <header class="page-header statistics-header">
+        <div><h1>Statistics</h1><p class="subtitle">Migration history and resource usage, in one place.</p></div>
+        <label class="vm-picker">Chart for <select id="statistics-vm"><option value="">All VMs</option></select></label>
+      </header>
+      <div class="metric-picker" role="group" aria-label="Metric to visualize">
+        <button type="button" data-metric="migration" aria-pressed="true"><span>Migration downtime</span><small>Completed migrations</small></button>
+        <button type="button" data-metric="cpu_percent" aria-pressed="false"><span>CPU usage</span><small>Last 60 seconds</small></button>
+        <button type="button" data-metric="memory_percent" aria-pressed="false"><span>Memory usage</span><small>Last 60 seconds</small></button>
+      </div>
+      <section class="statistics-chart-card" aria-labelledby="statistics-chart-title">
+        <div class="section-heading"><div><h2 id="statistics-chart-title">Migration downtime over time</h2><p id="statistics-chart-note" class="subtitle">Loading statistics…</p></div><span id="statistics-reading"></span></div>
+        <div id="statistics-chart"></div>
+        <p id="statistics-point" class="statistics-point" role="status">Select a point to inspect it.</p>
+      </section>
+      <div class="section-heading"><div><h2>All VMs <span id="statistics-vm-count"></span></h2><p class="subtitle statistics-table-note">Select a VM to focus the chart. Migration summaries include all recorded events.</p></div><span id="statistics-update" role="status"></span></div>
+      <div class="table-wrap statistics-table-wrap" tabindex="0" role="region" aria-label="VM statistics">
+        <table><thead><tr><th scope="col">VM / node</th><th scope="col" class="numeric" aria-sort="descending">Last downtime</th><th scope="col" class="numeric">Min</th><th scope="col" class="numeric">Avg</th><th scope="col" class="numeric">Max</th><th scope="col" class="numeric">Migrations</th><th scope="col" class="numeric">CPU</th><th scope="col" class="numeric">Memory</th></tr></thead><tbody id="statistics-rows"><tr><td colspan="8" class="empty-state">Loading statistics…</td></tr></tbody></table>
+      </div>
+    </section>
   </main>
+  <dialog id="about-dialog" class="about-dialog" aria-labelledby="about-version">
+    <form method="dialog"><button class="about-close" aria-label="Close about Reamer" autofocus>×</button></form>
+    <img id="about-logo" class="about-logo" data-src="/static/reamer-logo.png" alt="Reamer" width="560" height="200">
+    <p id="about-version">Reamer {escape(reamer_version())}</p>
+  </dialog>
   <script>
     const refreshNote = document.getElementById("refresh-note");
     const migrationToggle = document.getElementById("migration-toggle");
@@ -592,6 +744,30 @@ class HeartbeatServer:
         }});
         if (!response.ok) throw new Error("Status request failed");
         const updated = new DOMParser().parseFromString(await response.text(), "text/html");
+        const grid = document.getElementById("fleet-overview");
+        const nextGrid = updated.getElementById("fleet-overview");
+        if (!nextGrid) throw new Error("Invalid overview response");
+        const matrix = grid.querySelector(".vm-matrix");
+        const squares = new Map([...matrix.children].map(square => [square.dataset.clientId, square]));
+        const nextSquares = [...nextGrid.querySelector(".vm-matrix").children];
+        const present = new Set(nextSquares.map(square => square.dataset.clientId));
+        squares.forEach((square, id) => {{ if (!present.has(id)) square.remove(); }});
+        nextSquares.forEach((next, index) => {{
+          const square = squares.get(next.dataset.clientId) || next;
+          square.className = next.className;
+          square.title = next.title;
+          square.setAttribute("aria-label", next.getAttribute("aria-label"));
+          if (matrix.children[index] !== square) matrix.insertBefore(square, matrix.children[index] || null);
+        }});
+        [".section-heading", ".fleet-legend", ".fleet-empty"].forEach(selector => {{
+          const current = grid.querySelector(selector), next = nextGrid.querySelector(selector);
+          if (current.innerHTML !== next.innerHTML) current.innerHTML = next.innerHTML;
+          current.hidden = next.hidden;
+        }});
+        const inspectedSquare = matrix.querySelector(":focus") || matrix.querySelector(":hover");
+        document.getElementById("vm-reading").textContent = inspectedSquare
+          ? inspectedSquare.getAttribute("aria-label")
+          : "Hover or focus a square to identify a VM. Select it to open Details.";
         // Keep the document, logo, and scrollable table container mounted.
         const selectors = [".overview", ".summary-status", "tbody"];
         const replacements = selectors.map(selector => updated.querySelector(selector));
@@ -601,8 +777,9 @@ class HeartbeatServer:
         }}
         const focusedForm = document.activeElement.closest(".stress-form");
         const focusedControl = focusedForm ? [focusedForm.elements.client_id.value, focusedForm.elements.kind.value] : null;
+        const focusedRow = document.activeElement.matches("tr[data-client-id]") ? document.activeElement.dataset.clientId : null;
         selectors.forEach((selector, index) => {{
-          const current = document.querySelector(selector);
+          const current = document.getElementById("details-panel").querySelector(selector);
           const next = replacements[index];
           current.className = next.className;
           if (current.innerHTML !== next.innerHTML) {{
@@ -614,6 +791,10 @@ class HeartbeatServer:
           const form = Array.from(document.querySelectorAll(".stress-form")).find(form =>
             form.elements.client_id.value === focusedControl[0] && form.elements.kind.value === focusedControl[1]);
           if (form) form.querySelector("button").focus({{preventScroll: true}});
+        }}
+        if (focusedRow) {{
+          const row = [...document.querySelectorAll("#details-panel tr[data-client-id]")].find(row => row.dataset.clientId === focusedRow);
+          row?.focus({{preventScroll: true}});
         }}
         refreshNote.textContent = "Auto-refresh · every second";
       }} catch (error) {{

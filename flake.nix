@@ -22,7 +22,7 @@
       serverDnsLabels = lib.splitString "." serverDnsName;
       cloudInitOverrideServerDnsName = "cloud-init-server";
       cloudInitOverrideBuiltInServerHost = "does-not-resolve.invalid";
-      numClientVms = 2;
+      numClientVms = 6;
       heartbeatIntervalSeconds = 0.1;
       lib = pkgs.lib;
       memtouchPackage = memtouch.packages.${system}.default.overrideAttrs (old: {
@@ -33,6 +33,9 @@
         '';
       });
       clientNodeNames = builtins.genList (i: "client${toString (i + 1)}") numClientVms;
+      clientVmUuids = lib.genAttrs clientNodeNames (name:
+        if name == "client1" then "37914fc2-9f9a-4979-b3ea-641e1be1d233"
+        else "00000000-0000-4000-8000-${lib.fixedWidthString 12 "0" (lib.removePrefix "client" name)}");
       cloudInitOverrideMetadata = pkgs.stdenv.mkDerivation {
         name = "heartbeat-demo-cloud-init-override-metadata";
         buildCommand = ''
@@ -57,7 +60,7 @@
 
       heartbeatDemo = pkgs.stdenvNoCC.mkDerivation {
         pname = "heartbeat-demo";
-        version = "1.0.1";
+        version = "0.9-${builtins.substring 0 7 (self.rev or self.dirtyRev or "unknown")}";
         src = ./.;
 
         dontConfigure = true;
@@ -74,6 +77,8 @@
           runHook preInstall
           mkdir -p $out/libexec/heartbeat-demo
           cp server.py client.py migrations.py $out/libexec/heartbeat-demo/
+          cp reamer-logo.png $out/libexec/heartbeat-demo/
+          printf '%s\n' "$version" > $out/libexec/heartbeat-demo/VERSION
           cp -r static $out/libexec/heartbeat-demo/
           chmod +x $out/libexec/heartbeat-demo/server.py $out/libexec/heartbeat-demo/client.py
           runHook postInstall
@@ -299,8 +304,8 @@
               system.name = clientName;
               networking.hostName = clientName;
               virtualisation.cores = 2;
-              virtualisation.qemu.options = lib.optionals (clientName == "client1") [
-                "-uuid" "37914fc2-9f9a-4979-b3ea-641e1be1d233"
+              virtualisation.qemu.options = [
+                "-uuid" clientVmUuids.${clientName}
               ];
               services.heartbeatDemoClient.enable = true;
               services.heartbeatDemoClient.serverHost = serverDnsName;
@@ -341,13 +346,49 @@
           + "\n"
           + lib.concatMapStringsSep "\n" (clientName: ''
             server.wait_until_succeeds(
-                "curl --fail --silent http://127.0.0.1:2222/ | grep -q '${clientName}'"
+                "curl --fail --silent http://127.0.0.1:2222/ | grep -q '${clientVmUuids.${clientName}}'"
             )
           '') clientNodeNames
           + lib.optionalString (numClientVms > 0) ''
 
             import re
             import shlex
+            import json
+
+            client_uuids = json.loads('${builtins.toJSON clientVmUuids}')
+
+            def check_display_id(name, label):
+                page = server.succeed("curl --fail --silent http://127.0.0.1:2222/")
+                assert f'class="client-id">{label}<span' in page
+                squares = dict(re.findall(r'class="vm-square [^"]+" data-client-id="([^"]+)" aria-label="([^"]+)"', page))
+                assert squares[name].startswith(label + " · "), squares
+                data = json.loads(server.succeed("curl --fail --silent http://127.0.0.1:2222/statistics"))
+                key = client_uuids[name] if label != name else "client:" + name
+                guest = next(vm for vm in data["vms"] if vm["id"] == key)
+                assert guest["name"] == label, guest
+                if label != name:
+                    assert f'class="client-id">{name}<span' not in page
+
+            with subtest("Client labels prefer UUID and fall back to hostname"):
+                for name, identity in client_uuids.items():
+                    check_display_id(name, identity)
+                # Simulate an older client without DMI UUID support, then upgrade it.
+                guest = [${lib.concatStringsSep ", " clientNodeNames}][-1]
+                name = "${lib.last clientNodeNames}"
+                guest.succeed("systemctl stop heartbeat-demo-client.service")
+                payload = json.dumps({"type": "heartbeat", "client_id": name}) + "\n"
+                guest.succeed("python3 -c " + shlex.quote(
+                    "import socket; s=socket.create_connection(('${serverDnsName}',12345)); "
+                    f"s.sendall({payload.encode()!r}); s.close()"))
+                server.wait_until_succeeds(
+                    "curl --fail --silent http://127.0.0.1:2222/status | grep -Fq " +
+                    shlex.quote(f'class="client-id">{name}<span'))
+                check_display_id(name, name)
+                guest.succeed("systemctl start heartbeat-demo-client.service")
+                server.wait_until_succeeds(
+                    "curl --fail --silent http://127.0.0.1:2222/status | grep -Fq " +
+                    shlex.quote(f'class="client-id">{client_uuids[name]}<span'))
+                check_display_id(name, client_uuids[name])
 
             def append_migration_log(machine, text):
                 machine.succeed("printf %s " + shlex.quote(text + "\n") + " >> /tmp/ch-logs/instance-00000064.log")
@@ -375,6 +416,73 @@
                     page = server.succeed("curl --fail --silent http://127.0.0.1:2222/status")
                     assert "5 migrations" in page
                     assert "Min 40 ms · Avg 73.2 ms · Max 111 ms" in page
+                    statistics = json.loads(server.succeed("curl --fail --silent 'http://127.0.0.1:2222/statistics?vm=37914fc2-9f9a-4979-b3ea-641e1be1d233'"))
+                    assert statistics["selected"] == "37914fc2-9f9a-4979-b3ea-641e1be1d233"
+                    assert statistics["events"][-1]["downtime_ms"] == 40
+                    guest_stats = next(vm for vm in statistics["vms"] if vm["id"] == client_uuids["client1"])
+                    assert guest_stats["migration"]["count"] == 5
+                    assert guest_stats["history"]
+                    server.succeed("curl --fail --silent http://127.0.0.1:2222/static/statistics.js >/dev/null")
+                    server.succeed("curl --fail --silent http://127.0.0.1:2222/static/statistics.css >/dev/null")
+
+            expected_downtimes = {"client1": [89, 68, 58, 111, 40]}
+
+            def check_fleet_statistics():
+                server.wait_until_succeeds(
+                    "curl --fail --silent http://127.0.0.1:2222/status | grep -q 'Total Clients: ${toString numClientVms}'")
+                data = json.loads(server.succeed("curl --fail --silent http://127.0.0.1:2222/statistics"))
+                guests = {vm["id"]: vm for vm in data["vms"]}
+                assert set(guests) == set(client_uuids.values()), guests
+                assert len(data["events"]) == sum(map(len, expected_downtimes.values()))
+                assert data["events"] == sorted(data["events"], key=lambda event: event["at"])
+                for name, identity in client_uuids.items():
+                    guest = guests[identity]
+                    assert guest["id"] == identity
+                    assert guest["name"] == identity
+                    values = expected_downtimes.get(name, [])
+                    stats = guest["migration"]
+                    if values:
+                        assert stats["count"] == len(values), (name, stats)
+                        assert stats["last_ms"] == values[-1], (name, stats)
+                        assert stats["min_ms"] == min(values)
+                        assert stats["max_ms"] == max(values)
+                        assert abs(stats["avg_ms"] - sum(values) / len(values)) < 0.001
+                        index = int(name.removeprefix("client"))
+                        assert stats["node"] == ("compute-a" if index == 1 or index % 2 == 0 else "compute-b")
+                    else:
+                        assert stats is None
+                    selected = json.loads(server.succeed(
+                        "curl --fail --silent " + shlex.quote("http://127.0.0.1:2222/statistics?vm=" + identity)))
+                    assert selected["selected"] == identity
+                    assert {vm["name"] for vm in selected["vms"]} == set(client_uuids.values())
+                    assert all(event["vm_uuid"] == identity for event in selected["events"])
+                    assert [event["downtime_ms"] for event in selected["events"]] == values
+
+            if ${toString numClientVms} >= 2:
+                with subtest("Fleet statistics keep multiple VM migration histories separate"):
+                    # Leave the final guest without migrations to exercise the empty state.
+                    # Both compute nodes retain logs for every other guest.
+                    names = sorted(client_uuids, key=lambda name: int(name.removeprefix("client")))
+                    for name in names[1:-1]:
+                        index = int(name.removeprefix("client"))
+                        identity = client_uuids[name]
+                        values = [index * 10 + delta for delta in [19, 3, 27, 8][:2 + index % 3]]
+                        expected_downtimes[name] = values
+                        for node_index, machine in enumerate([client1, client2]):
+                            lines = [f'cloud-hypervisor: 2026-09-27T01:00:00Z: <vmm> INFO:test -- system_uuid: Some("{identity}")']
+                            for event_index, downtime in enumerate(values):
+                                # Alternating senders model back-and-forth migrations.
+                                if event_index % 2 == node_index:
+                                    lines.append(f'cloud-hypervisor: 2026-09-27T{event_index + 2:02}:00:{index:02}Z: <migration> INFO:test -- Migration completed after 0.3s with a downtime of {downtime}ms (goal was 300ms)')
+                            if node_index == index % 2:
+                                lines.append('cloud-hypervisor: 2026-09-27T08:00:00Z: <vmm> INFO:test -- Event: source = vm event = migration-receive-finished')
+                            path = f"/tmp/ch-logs/instance-{index:08x}.log"
+                            machine.succeed("printf %s " + shlex.quote("\n".join(lines) + "\n") + " > " + path)
+                    total = sum(map(len, expected_downtimes.values()))
+                    server.wait_until_succeeds(
+                        "curl --fail --silent http://127.0.0.1:2222/statistics | python3 -c " +
+                        shlex.quote(f'import json,sys; assert len(json.load(sys.stdin)["events"]) == {total}'))
+                    check_fleet_statistics()
 
             def stress_command(kind, action):
                 page = server.succeed("curl --fail --silent http://127.0.0.1:2222/")
@@ -434,6 +542,8 @@
                 page = server.succeed("curl --fail --silent http://127.0.0.1:2222/status")
                 assert "Process exited with code" not in page
                 assert 'class="stress-bandwidth"' not in page
+                if ${toString numClientVms} >= 2:
+                    check_fleet_statistics()
           '';
       })) {
         inherit system pkgs;
