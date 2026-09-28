@@ -696,6 +696,16 @@ class HeartbeatServer:
         <div class="section-heading"><div><h2 id="statistics-chart-title">Migration downtime over time</h2><p id="statistics-chart-note" class="subtitle">Loading statistics…</p></div><span id="statistics-reading"></span></div>
         <div id="statistics-chart"></div>
         <p id="statistics-point" class="statistics-point" role="status">Select a point to inspect it.</p>
+        <div id="migration-time-range" class="time-range" hidden>
+          <div class="time-range-heading"><span id="migration-time-label"></span><button id="migration-time-reset" type="button">Full range</button></div>
+          <div id="migration-time-track" class="time-track">
+            <div id="migration-time-events" class="time-events" aria-hidden="true"></div>
+            <button id="migration-time-window" class="time-window" type="button" role="slider" aria-label="Move selected time interval" aria-describedby="migration-time-help"></button>
+            <button id="migration-time-start" class="time-handle" type="button" role="slider" aria-label="Start of time interval" aria-describedby="migration-time-help"></button>
+            <button id="migration-time-end" class="time-handle" type="button" role="slider" aria-label="End of time interval" aria-describedby="migration-time-help"></button>
+          </div>
+          <p id="migration-time-help" class="subtitle">Drag either edge to resize, or the middle to move. Arrow keys work too.</p>
+        </div>
       </section>
       <div class="section-heading"><div><h2>All VMs <span id="statistics-vm-count"></span></h2><p class="subtitle statistics-table-note">Select a VM to focus the chart. Migration summaries include all recorded events.</p></div><span id="statistics-update" role="status"></span></div>
       <div class="table-wrap statistics-table-wrap" tabindex="0" role="region" aria-label="VM statistics">

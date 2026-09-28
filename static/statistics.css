@@ -50,6 +50,20 @@
 #statistics-chart .memory .plot-point, #statistics-chart .memory .plot-band { fill: #b4a2ff; }
 #statistics-chart .plot-stem { stroke: #71c7ff; opacity: .18; }
 .statistics-point { color: var(--muted); min-height: 20px; font-size: 12px; margin: 8px 0 0; font-variant-numeric: tabular-nums; }
+.time-range { margin: 18px 0 10px; border-top: 1px solid var(--border); padding-top: 14px; }
+.time-range-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--muted); }
+.time-range-heading button { background: none; border: 0; padding: 6px 0 6px 10px; color: #71c7ff; font: inherit; white-space: nowrap; cursor: pointer; }
+.time-range-heading button:disabled { color: var(--muted); cursor: default; opacity: .6; }
+.time-track { height: 32px; position: relative; margin: 12px 7px; background: #0c1118; border-radius: 5px; }
+.time-events { position: absolute; inset: 0; overflow: hidden; border-radius: inherit; pointer-events: none; }
+.time-events i { position: absolute; top: 8px; height: 16px; width: 2px; background: #71c7ff; opacity: .4; }
+.time-window { position: absolute; top: 0; height: 100%; background: #71c7ff24; border: 1px solid #71c7ff70; border-radius: 4px; cursor: grab; touch-action: none; }
+.time-window:active { cursor: grabbing; }
+.time-handle { position: absolute; top: -2px; height: 36px; width: 14px; transform: translateX(-50%); border: 1px solid #71c7ff; border-radius: 4px; background: #253c51; cursor: ew-resize; touch-action: none; padding: 0; }
+.time-handle::before { content: ''; position: absolute; inset: -4px -6px; }
+.time-handle::after { content: ''; position: absolute; top: 10px; bottom: 10px; left: 5px; border-left: 2px solid #71c7ff; }
+.time-handle:focus-visible, .time-window:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; z-index: 1; }
+.time-handle:disabled, .time-window:disabled { cursor: default; opacity: .5; }
 #statistics-vm-count, #statistics-update { color: var(--muted); font-size: 12px; font-weight: 400; }
 .statistics-table-wrap td, .statistics-table-wrap th { padding: 14px 16px; }
 .statistics-table-wrap .vm-name { border: 0; background: none; color: var(--text); font: inherit; font-weight: 600; padding: 0; cursor: pointer; text-align: left; overflow-wrap: anywhere; }

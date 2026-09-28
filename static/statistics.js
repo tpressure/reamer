@@ -18,6 +18,7 @@
   const ns = 'http://www.w3.org/2000/svg';
   let active = false, selected = '', metric = 'migration', data = null;
   let timer, request, generation = 0, optionSignature = '';
+  let timeWindow = null, rangeDomain = null, rangeDrag = null, rangeSignature = '';
   const rows = new Map();
   const number = value => new Intl.NumberFormat(undefined, {maximumFractionDigits: 1}).format(value);
   const duration = value => value == null ? '—' : `${number(value)} ms`;
@@ -60,6 +61,7 @@
     if (row) { row.scrollIntoView({block: 'center'}); row.focus({preventScroll: true}); }
   });
   function selectVm(value) {
+    timeWindow = null;
     selected = value; picker.value = value;
     setText(byId('statistics-chart-note'), 'Loading VM history…');
     refresh();
@@ -162,18 +164,102 @@
     }));
     return [...times].sort((a, b) => a[0] - b[0]).map(([at, values]) => ({at, value: values.reduce((sum, v) => sum + v, 0) / values.length, min: Math.min(...values), max: Math.max(...values), count: values.length, key: String(Math.round(at))}));
   }
+  const rangeControls = ['start', 'end', 'window'].map(name => byId('migration-time-' + name));
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  function changeRange(kind, value, initial) {
+    const [min, max] = rangeDomain;
+    const gap = (max - min) / 1000;
+    let [start, end] = initial;
+    if (kind === 'start') start = clamp(value, min, end - gap);
+    else if (kind === 'end') end = clamp(value, start + gap, max);
+    else {
+      const width = end - start;
+      start = clamp(value, min, max - width); end = start + width;
+    }
+    timeWindow = start <= min && end >= max ? null : [start, end];
+    renderChart();
+  }
+  rangeControls.forEach(control => {
+    const kind = control.id.replace('migration-time-', '');
+    control.addEventListener('pointerdown', event => {
+      if (control.disabled || event.button !== 0 || !rangeDomain) return;
+      event.preventDefault(); control.focus({preventScroll: true});
+      control.setPointerCapture(event.pointerId);
+      rangeDrag = {kind, x: event.clientX, initial: [...(timeWindow || rangeDomain)],
+        domain: [...rangeDomain], width: byId('migration-time-track').getBoundingClientRect().width};
+    });
+    control.addEventListener('pointermove', event => {
+      if (!rangeDrag || !control.hasPointerCapture(event.pointerId)) return;
+      const drag = rangeDrag;
+      const offset = (event.clientX - drag.x) / drag.width * (drag.domain[1] - drag.domain[0]);
+      changeRange(drag.kind, drag.initial[drag.kind === 'end' ? 1 : 0] + offset, drag.initial);
+    });
+    const finish = () => { if (rangeDrag) { rangeDrag = null; if (data) renderChart(); } };
+    control.addEventListener('lostpointercapture', finish);
+    control.addEventListener('pointercancel', finish);
+    control.addEventListener('keydown', event => {
+      if (!rangeDomain || !['ArrowLeft', 'ArrowRight', 'ArrowDown', 'ArrowUp', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) return;
+      event.preventDefault();
+      const initial = timeWindow || rangeDomain;
+      const step = (rangeDomain[1] - rangeDomain[0]) / 100 * (event.key.startsWith('Page') || event.shiftKey ? 10 : 1);
+      const direction = ['ArrowLeft', 'ArrowDown', 'PageDown'].includes(event.key) ? -1 : 1;
+      const value = event.key === 'Home' ? rangeDomain[0] : event.key === 'End' ? rangeDomain[1]
+        : initial[kind === 'end' ? 1 : 0] + direction * step;
+      changeRange(kind, value, initial);
+    });
+  });
+  byId('migration-time-reset').addEventListener('click', () => { timeWindow = null; renderChart(); });
+  function renderTimeRange(points) {
+    const visible = metric === 'migration' && points.length > 0;
+    byId('migration-time-range').hidden = !visible;
+    if (!visible) return null;
+    rangeDomain = rangeDrag?.domain || [points[0].at, points.at(-1).at];
+    const [min, max] = rangeDomain, span = max - min;
+    if (timeWindow && !rangeDrag) {
+      const width = Math.min(timeWindow[1] - timeWindow[0], span);
+      const start = clamp(timeWindow[0], min, max - width);
+      timeWindow = width === span ? null : [start, start + width];
+    }
+    const bounds = timeWindow || rangeDomain;
+    const [start, end] = bounds;
+    const left = span ? (start - min) / span * 100 : 0;
+    const right = span ? (end - min) / span * 100 : 100;
+    rangeControls[0].style.left = left + '%';
+    rangeControls[1].style.left = right + '%';
+    rangeControls[2].style.left = left + '%';
+    rangeControls[2].style.width = (right - left) + '%';
+    rangeControls.forEach((control, index) => {
+      control.disabled = !span || (index === 2 && !timeWindow);
+      control.setAttribute('aria-valuemin', index === 1 ? start : min);
+      control.setAttribute('aria-valuemax', index === 0 ? end : index === 2 ? max - (end - start) : max);
+      control.setAttribute('aria-valuenow', index === 1 ? end : start);
+      control.setAttribute('aria-valuetext', index === 2 ? `${dateTime(start * 1000)} to ${dateTime(end * 1000)}` : dateTime(bounds[index] * 1000));
+    });
+    setText(byId('migration-time-label'), `${dateTime(start * 1000)} — ${dateTime(end * 1000)}`);
+    byId('migration-time-reset').disabled = !timeWindow;
+    const signature = points.map(point => point.at).join(',') + ':' + rangeDomain.join(',');
+    if (signature !== rangeSignature) {
+      rangeSignature = signature;
+      byId('migration-time-events').replaceChildren(...points.map(point => {
+        const tick = document.createElement('i'); tick.style.left = (span ? (point.at - min) / span * 100 : 50) + '%'; return tick;
+      }));
+    }
+    return bounds;
+  }
   function renderChart() {
     const chosen = data.vms.find(vm => vm.id === selected);
     const vms = chosen ? [chosen] : data.vms;
     const migration = metric === 'migration';
     const names = new Map(data.vms.map(vm => [vm.vm_uuid, vm.name]));
-    const points = migration ? data.events.map(event => ({at: Date.parse(event.at) / 1000, value: event.downtime_ms, name: names.get(event.vm_uuid) || event.vm_uuid, key: event.vm_uuid + event.at})) : usagePoints(vms);
+    const available = migration ? data.events.map(event => ({at: Date.parse(event.at) / 1000, value: event.downtime_ms, name: names.get(event.vm_uuid) || event.vm_uuid, key: event.vm_uuid + event.at})) : usagePoints(vms);
+    const bounds = renderTimeRange(available);
+    const points = migration && bounds ? available.filter(point => point.at >= bounds[0] && point.at <= bounds[1]) : available;
     const label = migration ? 'Migration downtime' : metric === 'cpu_percent' ? 'CPU usage' : 'Memory usage';
     const total = vms.reduce((sum, vm) => sum + (vm.migration?.count || 0), 0);
     setText(byId('statistics-chart-title'), label + ' over time');
     const scope = chosen ? chosen.name : 'All VMs';
     setText(byId('statistics-chart-note'), migration
-      ? `${scope} · ${points.length < total ? `latest ${points.length} of ${total}` : points.length} completed migrations · each point is one migration`
+      ? `${scope} · ${timeWindow ? `${points.length} in selected interval · ` : ''}${available.length < total ? `latest ${available.length} of ${total}` : available.length} completed migrations${timeWindow ? ' available' : ' · each point is one migration'}`
       : `${scope} · last 60 seconds${chosen ? '' : ' · average line, min–max band'}`);
     setText(byId('statistics-reading'), points.length ? (migration ? duration(points.at(-1).value) : percent(points.at(-1).value)) : '—');
     byId('statistics-reading').title = migration ? 'Most recent migration in this chart' : 'Most recent sample in this chart';
@@ -182,14 +268,14 @@
     setText(byId('statistics-point'), 'Hover or focus a point to inspect it.');
     if (!points.length) {
       const empty = document.createElement('div'); empty.className = 'empty-state';
-      const heading = document.createElement('strong'); heading.textContent = migration ? 'No completed migrations yet' : 'No recent usage samples';
-      const hint = document.createElement('span'); hint.textContent = migration ? 'Downtime history appears when compute nodes report completed migrations.' : 'Usage appears when guest clients send heartbeats. Only the last 60 seconds are retained.';
+      const heading = document.createElement('strong'); heading.textContent = migration ? (available.length ? 'No migrations in this interval' : 'No completed migrations yet') : 'No recent usage samples';
+      const hint = document.createElement('span'); hint.textContent = migration ? (available.length ? 'Expand the interval or choose Full range to see more migrations.' : 'Downtime history appears when compute nodes report completed migrations.') : 'Usage appears when guest clients send heartbeats. Only the last 60 seconds are retained.';
       empty.append(heading, hint); chart.append(empty); setText(byId('statistics-point'), ''); return;
     }
     const width = Math.max(280, chart.clientWidth), height = 245;
     const left = 62, right = width - 12, top = 12, bottom = height - 35;
-    let start = migration ? points[0].at : data.now - 60;
-    let end = migration ? points.at(-1).at : data.now;
+    let start = migration ? bounds[0] : data.now - 60;
+    let end = migration ? bounds[1] : data.now;
     if (start === end) { start -= 60; end += 60; }
     const maximum = migration ? Math.max(1, ...points.map(point => point.value)) : 100;
     const power = 10 ** Math.floor(Math.log10(maximum));
