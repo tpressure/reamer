@@ -82,6 +82,39 @@ Example with explicit settings:
 python3 client.py --host 127.0.0.1 --port 12345 --client-id client-a --interval 2
 ```
 
+## Compute-node migration reporting
+
+Build a portable reporter, then copy the generated file to **each compute node**:
+
+```bash
+nix build .#server-status-update.sh
+cp result/server-status-update.sh /tmp/server-status-update.sh
+```
+
+On each compute node, run it with permission to read the Cloud Hypervisor logs and write its local state:
+
+```bash
+sudo sh ./server-status-update.sh
+```
+
+The script requires `python3` on `PATH`, but no Nix installation, OpenStack CLI, libvirt CLI, or third-party Python modules. It uses the same `serverDnsName` configured for the client image, HTTP port `2222`, the local hostname as its node name, `/var/log/libvirt/ch` as its log directory, and `/var/lib/reamer-compute/state.sqlite3` for its cache. Give nodes distinct names with `--node` if their hostnames are not unique. Run one reporter per compute node; each node must have its own state file. It runs continuously until interrupted and retries connection failures. For a one-off scan, use `--once`.
+
+Overrides are available for testing or different deployments:
+
+```bash
+sh ./server-status-update.sh --host reamer.example.org --port 2222 \
+  --node compute-a --log-dir /path/to/ch-logs \
+  --state-file /path/to/compute-a.sqlite3 --interval 2
+```
+
+Deploy the updated server and guest clients, then select **Show migration details** on the status page. The choice is remembered in that browser. Each guest reports its DMI product UUID, which matches the `system_uuid` in Cloud Hypervisor's VM configuration logs, independently of its randomized hostname or the instance log filename. Clients without a readable DMI UUID show an identity-unavailable message.
+
+The compact details show the compute node, **last downtime**, minimum, average, maximum, and migration count. Only explicit sender-side `Migration completed ... with a downtime of ...ms` records count. Precopy estimates, downtime goals, receiver resumes, and post-migration announcements do not count as additional measurements. The sample log's four completed sends produce **min 58 ms, avg 81.5 ms, max 111 ms, last 111 ms**. The other compute node contributes its own completed sends to the same VM's statistics.
+
+Records are deduplicated by VM UUID and completion timestamp, and “last” uses the event timestamp rather than arrival order. The latest boot or migration-receive completion identifies the node; a later send-completion, VM deletion, or VM shutdown on that node clears the placement until another node reports a completed receive or boot. An old source node's shutdown cannot override the destination's newer placement. Placement describes the latest logged lifecycle events, not a live libvirt inventory; keep node clocks synchronized. A node whose reporter has not contacted the server for 30 seconds is marked stale.
+
+The reporter scans existing `instance-*.log` files and numbered uncompressed rotations, then incrementally reads appended lines and discovers new files. It handles partial writes, replacement, and truncation. Compressed archives are not scanned. Its SQLite cache retains parsed records across restarts and rotation; it replays them when the server restarts. Log history that predates all retained logs and caches cannot be reconstructed. The server stores migration history in `/var/lib/reamer/migrations.sqlite3` in the Nix service, or `--migration-db` when run manually. **Reset Clients** resets heartbeats and charts, while migration history remains intact. Compute reports use the server's `/compute-report` endpoint on the same trusted network as the status page.
+
 ## Nix Flake
 
 This repo also exposes two UEFI-bootable raw NixOS images through flakes:

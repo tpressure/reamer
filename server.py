@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs
+from migrations import MigrationStore, vm_identity
 
 DEFAULT_PORT = 12345
 DEFAULT_HTTP_PORT = 8080
@@ -36,6 +37,7 @@ class HeartbeatServer:
         http_port: int = DEFAULT_HTTP_PORT,
         healthy_threshold_ms: int = DEFAULT_HEALTHY_THRESHOLD_MS,
         warning_threshold_ms: int = DEFAULT_WARNING_THRESHOLD_MS,
+        migration_db: str = ':memory:',
     ) -> None:
         self.host = host
         self.port = port
@@ -47,6 +49,7 @@ class HeartbeatServer:
         self.lock = threading.Lock()
         self.pending_commands = {}
         self.control_token = secrets.token_urlsafe(32)
+        self.migrations = MigrationStore(migration_db)
 
     def serve_forever(self) -> None:
         if self.enable_http:
@@ -93,7 +96,7 @@ class HeartbeatServer:
                 if not isinstance(client_id, str):
                     continue
                 supports_control = message.get("control_protocol") == 1
-                self.record_heartbeat(client_id, peer, message.get("metrics"), message.get("stress"), supports_control)
+                self.record_heartbeat(client_id, peer, message.get("metrics"), message.get("stress"), supports_control, message.get("vm_uuid"))
                 if supports_control:
                     reply = {"type": "heartbeat_ack", "commands": self.commands_for(client_id)}
                     try:
@@ -103,7 +106,7 @@ class HeartbeatServer:
 
         print(f"Client disconnected: {peer}")
 
-    def record_heartbeat(self, client_id: str, peer: str, metrics: object, stress: object = None, supports_control: bool = False) -> None:
+    def record_heartbeat(self, client_id: str, peer: str, metrics: object, stress: object = None, supports_control: bool = False, vm_uuid: object = None) -> None:
         timestamp = datetime.now(timezone.utc)
         second = int(time.monotonic())
         if not isinstance(metrics, dict):
@@ -118,6 +121,7 @@ class HeartbeatServer:
                 client["max_gap_ms"], self.get_interval_ms(client["last_heartbeat"], timestamp)
             )
             client.update(address=peer, last_heartbeat=timestamp)
+            client['vm_uuid'] = vm_identity(vm_uuid)
             for name, maximum in (("vcpu_count", 2**20), ("memory_total_bytes", 2**63 - 1)):
                 value = metrics.get(name)
                 client[name] = value if type(value) is int and 0 < value <= maximum else None
@@ -242,6 +246,23 @@ class HeartbeatServer:
                 self.wfile.write(body)
 
             def do_POST(self) -> None:
+                if self.path == '/compute-report':
+                    try:
+                        self.connection.settimeout(10)
+                        length = int(self.headers.get('Content-Length', '0'))
+                        if not 0 < length <= 262144 or self.headers.get_content_type() != 'application/json':
+                            raise ValueError('Expected a JSON report of at most 256 KiB')
+                        reply = server.migrations.ingest(json.loads(self.rfile.read(length)))
+                    except (ValueError, UnicodeError) as exc:
+                        self.send_error(400, str(exc))
+                        return
+                    body = json.dumps(reply).encode()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if self.path == "/stress":
                     try:
                         length = int(self.headers.get("Content-Length", "0"))
@@ -326,6 +347,8 @@ class HeartbeatServer:
                 + self.render_stress_controls(client, age_ms)
                 + '</div></td></tr>'
             )
+            rows.append('<tr class="migration-row"><td colspan="6">'
+                        + self.render_migration_details(client) + '</td></tr>')
 
         if not rows:
             rows.append(
@@ -456,6 +479,12 @@ class HeartbeatServer:
     .stress-error, .control-feedback {{ color: var(--stale); font-size: 11px; white-space: normal; }}
     .stress-error {{ flex-basis: 100%; max-width: 440px; }}
     .stress-bandwidth {{ color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+    .migration-row {{ display: none; }}
+    .show-migrations .migration-row {{ display: table-row; }}
+    .migration-row td {{ padding-top: 0; font-size: 12px; color: var(--muted); }}
+    .migration-details {{ display: flex; flex-wrap: wrap; gap: 8px 20px; font-variant-numeric: tabular-nums; }}
+    .migration-details strong {{ color: var(--text); font-weight: 600; }}
+    .migration-toggle {{ display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; margin-bottom: 14px; cursor: pointer; }}
     .control-feedback:empty {{ display: none; }}
     .client-id {{ font-weight: 600; white-space: normal; overflow-wrap: anywhere; min-width: 120px; max-width: 280px; }}
     .client-capacity {{ display: block; margin-top: 3px; color: var(--muted); font-size: 11px; font-weight: 400; white-space: nowrap; }}
@@ -505,6 +534,7 @@ class HeartbeatServer:
       </form>
     </header>
     <p id="control-feedback" class="control-feedback" role="status"></p>
+    <label class="migration-toggle"><input id="migration-toggle" type="checkbox">Show migration details</label>
     <noscript><p class="subtitle">JavaScript is disabled. Reload this page to update client status.</p></noscript>
     {self.render_status_content()}
     <footer class="page-footer">
@@ -518,6 +548,14 @@ class HeartbeatServer:
   </main>
   <script>
     const refreshNote = document.getElementById("refresh-note");
+    const migrationToggle = document.getElementById("migration-toggle");
+    try {{ migrationToggle.checked = localStorage.getItem("reamer-migrations") === "true"; }} catch (error) {{}}
+    function toggleMigrations() {{
+      document.body.classList.toggle("show-migrations", migrationToggle.checked);
+      try {{ localStorage.setItem("reamer-migrations", String(migrationToggle.checked)); }} catch (error) {{}}
+    }}
+    migrationToggle.addEventListener("change", toggleMigrations);
+    toggleMigrations();
     document.addEventListener("submit", async event => {{
       const form = event.target;
       if (!form.matches(".stress-form")) return;
@@ -591,6 +629,22 @@ class HeartbeatServer:
 </body>
 </html>
 """
+
+    def render_migration_details(self, client: dict) -> str:
+        stats = self.migrations.summary(client.get('vm_uuid'))
+        if not stats:
+            text = 'Waiting for compute-node reports' if client.get('vm_uuid') else 'VM identity unavailable — update the client to report its DMI UUID'
+            return f'<div class="migration-details">{text}</div>'
+        node = escape(stats['node']) if stats['node'] else 'Unknown / in transit / stopped'
+        if stats['node_stale'] and stats['node']:
+            node += ' (report stale)'
+        def duration(value):
+            return '—' if value is None else f'{value:g} ms'
+        return ('<div class="migration-details">'
+                f'<span title="Latest boot or receive-completion event in the compute logs">Node <strong>{node}</strong></span>'
+                f'<span title="{escape(stats["last_at"] or "No completed migration reported")}">Last downtime <strong>{duration(stats["last_ms"])}</strong></span>'
+                f'<span>Min {duration(stats["min_ms"])} · Avg {duration(stats["avg_ms"])} · Max {duration(stats["max_ms"])}</span>'
+                f'<span>{stats["count"]} migrations</span></div>')
 
     @staticmethod
     def format_capacity(client: dict) -> str:
@@ -716,6 +770,7 @@ class HeartbeatServer:
             return [
                 {
                     "client_id": client_id,
+                    "vm_uuid": client.get('vm_uuid'),
                     "address": client["address"],
                     "last_heartbeat": client["last_heartbeat"],
                     "max_gap_ms": client["max_gap_ms"],
@@ -775,6 +830,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple heartbeat TCP server")
     parser.add_argument("--host", default="0.0.0.0", help="Host/interface to bind to")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port to listen on")
+    parser.add_argument('--migration-db', default='reamer-migrations.sqlite3', help='Persistent migration database')
     parser.add_argument(
         "--enable-http",
         action="store_true",
@@ -817,6 +873,7 @@ def main() -> None:
         http_port=args.http_port,
         healthy_threshold_ms=args.healthy_threshold_ms,
         warning_threshold_ms=args.warning_threshold_ms,
+        migration_db=args.migration_db,
     )
     try:
         server.serve_forever()

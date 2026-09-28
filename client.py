@@ -11,6 +11,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import UUID
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 12345
@@ -19,6 +20,13 @@ DEFAULT_RETRY_DELAY = 2.0
 STRESS_KINDS = ("cpu", "memory")
 STRESS_STOP_GRACE_SECONDS = 2.0
 MEMORY_BANDWIDTH_MAX_AGE = 5.0
+
+
+def guest_uuid() -> str | None:
+    try:
+        return str(UUID(Path('/sys/class/dmi/id/product_uuid').read_text().strip()))
+    except (OSError, ValueError):
+        return None
 
 
 def available_vcpus() -> int:
@@ -244,6 +252,7 @@ def main() -> None:
     if args.interval <= 0 or args.retry_delay < 0:
         raise SystemExit("Heartbeat interval must be positive and retry delay non-negative.")
     stress = StressManager()
+    vm_uuid = guest_uuid()
     try:
         while True:
             try:
@@ -256,6 +265,7 @@ def main() -> None:
                             payload = {
                                 "type": "heartbeat",
                                 "client_id": args.client_id,
+                                "vm_uuid": vm_uuid,
                                 "sent_at": datetime.now(timezone.utc).isoformat(),
                                 "metrics": metrics.sample(),
                                 "control_protocol": 1,

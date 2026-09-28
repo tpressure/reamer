@@ -17,8 +17,8 @@
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
-      serverDnsName = "testvm";
-      serverDnsOverrideName = "testvm";
+      serverDnsName = "reamer-server-gonzo.oswl.bu-cloud.cyberus-technology.de";
+      serverDnsOverrideName = "reamer-server-gonzo.oswl.bu-cloud.cyberus-technology.de";
       serverDnsLabels = lib.splitString "." serverDnsName;
       cloudInitOverrideServerDnsName = "cloud-init-server";
       cloudInitOverrideBuiltInServerHost = "does-not-resolve.invalid";
@@ -73,11 +73,23 @@
         installPhase = ''
           runHook preInstall
           mkdir -p $out/libexec/heartbeat-demo
-          cp server.py client.py $out/libexec/heartbeat-demo/
+          cp server.py client.py migrations.py $out/libexec/heartbeat-demo/
           cp -r static $out/libexec/heartbeat-demo/
           chmod +x $out/libexec/heartbeat-demo/server.py $out/libexec/heartbeat-demo/client.py
           runHook postInstall
         '';
+      };
+
+      computeReporter = pkgs.writeTextFile {
+        name = "server-status-update.sh";
+        destination = "/server-status-update.sh";
+        executable = true;
+        # A copyable script for non-Nix compute hosts: only /bin/sh and python3.
+        text = "#!/bin/sh\nexec python3 - \"$@\" <<'REAMER_PYTHON'\n"
+          + lib.replaceStrings [ "DEFAULT_HOST = \"127.0.0.1\"" ]
+            [ "DEFAULT_HOST = ${builtins.toJSON serverDnsName}" ]
+            (builtins.readFile ./compute_reporter.py)
+          + "\nREAMER_PYTHON\n";
       };
 
       commonModule = { ... }: {
@@ -156,9 +168,11 @@
                   "--http-port" (toString cfg.httpPort)
                   "--healthy-threshold-ms" (toString cfg.healthyThresholdMs)
                   "--warning-threshold-ms" (toString cfg.warningThresholdMs)
+                  "--migration-db" "/var/lib/reamer/migrations.sqlite3"
                 ];
                 Restart = "always";
                 RestartSec = 2;
+                StateDirectory = "reamer";
               };
             };
           };
@@ -285,6 +299,9 @@
               system.name = clientName;
               networking.hostName = clientName;
               virtualisation.cores = 2;
+              virtualisation.qemu.options = lib.optionals (clientName == "client1") [
+                "-uuid" "37914fc2-9f9a-4979-b3ea-641e1be1d233"
+              ];
               services.heartbeatDemoClient.enable = true;
               services.heartbeatDemoClient.serverHost = serverDnsName;
               services.heartbeatDemoClient.intervalSeconds = heartbeatIntervalSeconds;
@@ -330,6 +347,34 @@
           + lib.optionalString (numClientVms > 0) ''
 
             import re
+            import shlex
+
+            def append_migration_log(machine, text):
+                machine.succeed("printf %s " + shlex.quote(text + "\n") + " >> /tmp/ch-logs/instance-00000064.log")
+
+            if ${toString numClientVms} >= 2:
+                with subtest("Compute reports merge logs from both nodes without OpenStack"):
+                    for machine, node in [(client1, "compute-a"), (client2, "compute-b")]:
+                        machine.succeed("mkdir -p /tmp/ch-logs")
+                        machine.succeed("cp ${./tests/fixtures/migration-source.log} /tmp/ch-logs/instance-00000064.log")
+                        machine.succeed(
+                            "systemd-run --unit=reamer-compute --setenv=PATH=/run/current-system/sw/bin "
+                            "${pkgs.runtimeShell} ${computeReporter}/server-status-update.sh "
+                            f"--node {node} --log-dir /tmp/ch-logs --state-file /tmp/compute.sqlite --interval 0.2"
+                        )
+                    append_migration_log(client2, 'cloud-hypervisor: 2026-09-26T00:00:00.000000Z: <vmm> INFO:test -- Event: source = vm event = migration-receive-finished')
+                    server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q 'Node <strong>compute-b</strong>'")
+                    page = server.succeed("curl --fail --silent http://127.0.0.1:2222/status")
+                    assert "4 migrations" in page
+                    assert "Min 58 ms · Avg 81.5 ms · Max 111 ms" in page
+                    assert "Last downtime <strong>111 ms</strong>" in page
+                    append_migration_log(client2, 'cloud-hypervisor: 2026-09-27T00:00:00.000000Z: <migration> INFO:test -- Migration completed after 0.3s with a downtime of 40ms (goal was 300ms)')
+                    append_migration_log(client1, 'cloud-hypervisor: 2026-09-27T00:00:01.000000Z: <vmm> INFO:test -- Event: source = vm event = migration-receive-finished')
+                    server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q 'Last downtime <strong>40 ms</strong>'")
+                    server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q 'Node <strong>compute-a</strong>'")
+                    page = server.succeed("curl --fail --silent http://127.0.0.1:2222/status")
+                    assert "5 migrations" in page
+                    assert "Min 40 ms · Avg 73.2 ms · Max 111 ms" in page
 
             def stress_command(kind, action):
                 page = server.succeed("curl --fail --silent http://127.0.0.1:2222/")
@@ -371,6 +416,8 @@
             with subtest("Server restart recovers running tests and allows abort"):
                 server.succeed("systemctl restart heartbeat-demo-server.service")
                 server.wait_for_open_port(2222)
+                if ${toString numClientVms} >= 2:
+                    server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q 'Last downtime <strong>40 ms</strong>'")
                 server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>Stop CPU</button>'")
                 server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q '>Stop memory</button>'")
                 assert client1.succeed("pgrep -x stress-ng").strip() == cpu_pid
@@ -578,6 +625,7 @@
       };
 
       server.raw = exportRawImage "heartbeat-demo-server.raw" "server.raw" self.packages.${system}.server-image;
+      server-status-update.sh = computeReporter;
       client.raw = exportRawImage "heartbeat-demo-client.raw" "client.raw" self.packages.${system}.client-image;
       cloud-init.raw = exportRawImage "heartbeat-demo-cloud-init.raw" "cloud-init.raw" self.packages.${system}.cloud-init-image;
     };
