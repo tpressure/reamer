@@ -76,7 +76,7 @@
         installPhase = ''
           runHook preInstall
           mkdir -p $out/libexec/heartbeat-demo
-          cp server.py client.py migrations.py $out/libexec/heartbeat-demo/
+          cp server.py client.py migrations.py migration_control.py $out/libexec/heartbeat-demo/
           cp reamer-logo.png $out/libexec/heartbeat-demo/
           printf '%s\n' "$version" > $out/libexec/heartbeat-demo/VERSION
           cp -r static $out/libexec/heartbeat-demo/
@@ -94,6 +94,17 @@
           + lib.replaceStrings [ "DEFAULT_HOST = \"127.0.0.1\"" ]
             [ "DEFAULT_HOST = ${builtins.toJSON serverDnsName}" ]
             (builtins.readFile ./compute_reporter.py)
+          + "\nREAMER_PYTHON\n";
+      };
+
+      controllerAgent = pkgs.writeTextFile {
+        name = "controller-agent.sh";
+        destination = "/controller-agent.sh";
+        executable = true;
+        text = "#!/bin/sh\nexec python3 - \"$@\" <<'REAMER_PYTHON'\n"
+          + lib.replaceStrings [ "DEFAULT_HOST = \"127.0.0.1\"" ]
+            [ "DEFAULT_HOST = ${builtins.toJSON serverDnsName}" ]
+            (builtins.readFile ./controller_agent.py)
           + "\nREAMER_PYTHON\n";
       };
 
@@ -484,6 +495,55 @@
                         shlex.quote(f'import json,sys; assert len(json.load(sys.stdin)["events"]) == {total}'))
                     check_fleet_statistics()
 
+            with subtest("Controller agent migrates between healthy hosts without repeated inventory commands"):
+                server.succeed("mkdir -p /tmp/controller-bin")
+                server.succeed("cp ${./tests/fixtures/openstack.py} /tmp/controller-bin/openstack && chmod +x /tmp/controller-bin/openstack")
+                server.succeed(
+                    "systemd-run --unit=reamer-controller --setenv=PATH=/tmp/controller-bin:/run/current-system/sw/bin "
+                    "${pkgs.runtimeShell} ${controllerAgent}/controller-agent.sh "
+                    "--controller test-controller --state-file /tmp/controller.sqlite --interval 0.2")
+
+                def migration_ready():
+                    server.wait_until_succeeds(
+                        "curl --fail --silent http://127.0.0.1:2222/status | grep -q 'host\"[>]Migrate</button>'")
+
+                def migrate():
+                    page = server.succeed("curl --fail --silent http://127.0.0.1:2222/")
+                    token = re.search(r'name="token" value="([^"]+)"', page).group(1)
+                    return server.succeed(
+                        "curl --silent -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:2222/migrate "
+                        f"--data-urlencode token={token} --data-urlencode client_id=client1")
+
+                migration_ready()
+                assert server.succeed("curl --silent -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:2222/migrate -d client_id=client1") == "403"
+                assert migrate() == "303"
+                assert migrate() == "400", "Duplicate clicks must not queue another migration"
+                server.wait_until_succeeds("grep -q 'migrate' /tmp/openstack-calls.jsonl")
+                # Restart Reamer while the fake OpenStack operation is still in flight.
+                server.succeed("systemctl restart heartbeat-demo-server.service")
+                server.wait_for_open_port(2222)
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q 'Migrated to compute-b'")
+                migration_ready()
+                assert migrate() == "303"
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q 'Migrated to compute-a'")
+                server.succeed("systemctl restart reamer-controller.service")
+                calls = [json.loads(line) for line in server.succeed("cat /tmp/openstack-calls.jsonl").splitlines()]
+                moves = [call for call in calls if call[:2] == ["server", "migrate"]]
+                assert len(moves) == 2, calls
+                assert [call[call.index("--host") + 1] for call in moves] == ["compute-b", "compute-a"]
+                assert len([call for call in calls if call[:2] == ["server", "show"]]) == 4, calls
+                # One discovery for the run, plus at most one after the explicit agent restart.
+                assert len([call for call in calls if call[:3] == ["compute", "service", "list"]]) <= 2, calls
+                server.succeed("touch /tmp/openstack-fail")
+                migration_ready()
+                assert migrate() == "303"
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q 'No valid host found'")
+                server.succeed("rm /tmp/openstack-fail")
+                assert migrate() == "303"
+                server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q 'Migrated to compute-b'")
+                if ${toString numClientVms} >= 2:
+                    check_fleet_statistics()
+
             def stress_command(kind, action):
                 page = server.succeed("curl --fail --silent http://127.0.0.1:2222/")
                 match = re.search(r'name="token" value="([^"]+)"', page)
@@ -667,6 +727,7 @@
       };
 
       packages.${system} = {
+        controller-agent = controllerAgent;
         default = heartbeatDemo;
         heartbeat-demo = heartbeatDemo;
         memtouch = memtouchPackage;
@@ -736,6 +797,7 @@
 
       server.raw = exportRawImage "heartbeat-demo-server.raw" "server.raw" self.packages.${system}.server-image;
       server-status-update.sh = computeReporter;
+      controller-agent.sh = controllerAgent;
       client.raw = exportRawImage "heartbeat-demo-client.raw" "client.raw" self.packages.${system}.client-image;
       cloud-init.raw = exportRawImage "heartbeat-demo-cloud-init.raw" "cloud-init.raw" self.packages.${system}.cloud-init-image;
     };

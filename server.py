@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from migrations import MigrationStore, vm_identity
+from migration_control import MigrationControl
 
 DEFAULT_PORT = 12345
 DEFAULT_HTTP_PORT = 8080
@@ -69,6 +70,7 @@ class HeartbeatServer:
         self.pending_commands = {}
         self.control_token = secrets.token_urlsafe(32)
         self.migrations = MigrationStore(migration_db)
+        self.migration_control = MigrationControl(self.migrations)
 
     def serve_forever(self) -> None:
         if self.enable_http:
@@ -288,13 +290,15 @@ class HeartbeatServer:
                 self.wfile.write(body)
 
             def do_POST(self) -> None:
-                if self.path == '/compute-report':
+                if self.path in ('/compute-report', '/controller-report'):
                     try:
                         self.connection.settimeout(10)
                         length = int(self.headers.get('Content-Length', '0'))
                         if not 0 < length <= 262144 or self.headers.get_content_type() != 'application/json':
                             raise ValueError('Expected a JSON report of at most 256 KiB')
-                        reply = server.migrations.ingest(json.loads(self.rfile.read(length)))
+                        report = json.loads(self.rfile.read(length))
+                        reply = (server.migrations.ingest(report) if self.path == '/compute-report'
+                                 else server.migration_control.report(report))
                     except (ValueError, UnicodeError) as exc:
                         self.send_error(400, str(exc))
                         return
@@ -305,7 +309,7 @@ class HeartbeatServer:
                     self.end_headers()
                     self.wfile.write(body)
                     return
-                if self.path == "/stress":
+                if self.path in ("/stress", "/migrate"):
                     try:
                         length = int(self.headers.get("Content-Length", "0"))
                         if not 0 < length <= 4096:
@@ -315,7 +319,13 @@ class HeartbeatServer:
                         if not secrets.compare_digest(token.encode("utf-8"), server.control_token.encode("ascii")):
                             self.send_error(403, "Reload the page before sending a command")
                             return
-                        server.request_stress(fields.get("client_id", [""])[0], fields.get("kind", [""])[0], fields.get("action", [""])[0])
+                        client_id = fields.get("client_id", [""])[0]
+                        if self.path == '/migrate':
+                            with server.lock:
+                                identity = server.clients.get(client_id, {}).get('vm_uuid')
+                            server.migration_control.request(identity)
+                        else:
+                            server.request_stress(client_id, fields.get("kind", [""])[0], fields.get("action", [""])[0])
                     except (ValueError, UnicodeError) as exc:
                         self.send_error(400, str(exc))
                         return
@@ -720,13 +730,13 @@ class HeartbeatServer:
       button.setAttribute("aria-disabled", "true");
       feedback.textContent = "";
       try {{
-        const response = await fetch("/stress", {{
+        const response = await fetch(form.action, {{
           method: "POST", body: new URLSearchParams(new FormData(form)),
           headers: {{"X-Requested-With": "fetch"}}, signal: controller.signal,
         }});
         if (!response.ok) throw new Error(response.status === 403
           ? "The server restarted. Wait for the next update and try again."
-          : "Could not send the stress command. Check the client connection and try again.");
+          : "Could not send the command. Check the connection and try again.");
       }} catch (error) {{
         feedback.textContent = error.message;
       }} finally {{
@@ -883,7 +893,35 @@ class HeartbeatServer:
             errors.append(client["control_error"])
         if errors:
             forms.append(f'<span class="stress-error">{escape(" · ".join(errors))}</span>')
+        forms.append(self.render_migrate_control(client))
         return '<div class="stress-controls">' + "".join(forms) + '</div>'
+
+    def render_migrate_control(self, client):
+        identity = client.get('vm_uuid')
+        state = self.migration_control.status(identity)
+        busy = state.get('state') in ('queued', 'running')
+        disabled = not identity or not state['available'] or busy
+        label = {'queued': 'Migration queued…', 'running': 'Migrating…'}.get(state.get('state'), 'Migrate')
+        title = 'Automatically migrate to another enabled, healthy compute host'
+        if not identity:
+            title = 'VM UUID required for migration'
+        elif not state['available']:
+            title = 'Waiting for the controller agent and at least two healthy compute hosts'
+        detail = ''
+        if state.get('destination'):
+            if state.get('state') != 'completed':
+                detail = 'Destination: ' + state['destination']
+            elif state.get('completed_at') is not None and time.time() - state['completed_at'] < 10:
+                detail = 'Migrated to ' + state['destination']
+        if state.get('error'):
+            detail = state['error']
+        return ('<form class="stress-form migration-form" method="post" action="/migrate">'
+                f'<input type="hidden" name="token" value="{self.control_token}">'
+                f'<input type="hidden" name="client_id" value="{escape(client["client_id"])}">'
+                '<input type="hidden" name="kind" value="migration">'
+                f'<button class="stress-button" type="submit" title="{escape(title)}"'
+                f'{" disabled" if disabled else ""}>{label}</button></form>'
+                + (f'<span class="{"stress-error" if state.get("error") else "migration-result"}">{escape(detail)}</span>' if detail else ''))
 
     @staticmethod
     def render_histogram(history: list[dict], name: str, label: str, second: int) -> str:

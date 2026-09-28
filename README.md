@@ -84,6 +84,53 @@ python3 client.py --host 127.0.0.1 --port 12345 --client-id client-a --interval 
 
 Click the Reamer logo to open the About overlay, showing a larger logo and `Reamer 0.9-<git hash>`. Close it with Escape, the close button, or a click outside. Nix embeds the build revision; source checkouts use their local Git revision. The large logo loads only when the overlay is opened.
 
+## Controller migration agent
+
+Build a portable script for the OpenStack controller:
+
+```bash
+nix build .#controller-agent.sh
+cp result/controller-agent.sh ./controller-agent.sh
+# Load your OpenStack admin credentials (openrc or OS_CLOUD), then:
+sudo -E sh ./controller-agent.sh
+```
+
+The controller needs Python 3 and the `openstack` CLI in its PATH. The script uses
+Reamer's configured DNS name and HTTP port 2222; `--host` and `--port` override
+these. OpenStack compute API 2.30 or newer is required for
+[scheduler-validated live migration to a chosen destination](https://docs.openstack.org/python-openstackclient/2025.2/cli/command-objects/server.html#server-migrate).
+Run one controller agent with a stable
+controller hostname and persistent `/var/lib/reamer-controller/state.sqlite3`;
+`--controller` and `--state-file` override these defaults. Run it under your
+usual service supervisor to keep it running. Credentials stay on the controller.
+The agent uses the same trusted network as the compute reporters.
+
+Each VM in **Details** has a **Migrate** button. It becomes available when the VM
+has a UUID and the controller reports at least two enabled, healthy compute
+hosts. No destination selection is needed: the controller queries the VM's
+actual Nova host and picks the next different healthy host in alphabetical
+order, wrapping around. With two nodes this moves to the other node; the same
+rule works with ten. Nova validates capacity and compatibility. A failed
+migration is shown beside the button and is never automatically retried.
+Successful “Migrated to …” messages disappear after ten seconds; errors remain visible.
+
+Host discovery uses one `openstack compute service list` invocation per minute,
+shared by all VMs; no periodic VM listing is needed. Each migration uses one
+`server show`, one `server migrate --live-migration --host ... --wait`, and a
+final `server show` to verify the destination. The CLI's `--wait` performs its
+own progress polling. Controller heartbeats continue every two seconds while
+OpenStack commands run. Migrations are processed one at a time to avoid a burst
+of simultaneous transfers.
+
+Requests survive Reamer restarts in its migration database. The controller
+journals command IDs before execution so retries and lost acknowledgements do
+not launch duplicate migrations. If the controller itself restarts during a
+migration, it reports an interrupted operation instead of resubmitting it;
+verify the VM's state in OpenStack before requesting another migration.
+Inventory older than two minutes and disconnected controllers disable new
+requests. This feature requires a server update and the new controller agent;
+existing VM clients and compute reporters do not need an update.
+
 ## Statistics tab
 
 The status page opens on **Overview**, a compact grid with one square per client VM: green for healthy heartbeats, yellow for warning, and red for stale. Client labels use the VM UUID when available, falling back to the hostname otherwise, throughout Overview, Details, and Statistics. Squares stay ordered by their displayed identifier as their colors update. Hover or focus a square to identify the VM; select it to open its row in **Details**, which contains the previous overview, resource charts, and stress controls.

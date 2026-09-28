@@ -25,6 +25,7 @@
 .fleet-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: var(--status-color); }
 .fleet-empty, .vm-reading { color: var(--muted); font-size: 12px; }
 .vm-reading { min-height: 20px; margin-top: 14px; overflow-wrap: anywhere; }
+.migration-result { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 #details-panel tr[data-client-id]:focus { outline: 2px solid #71c7ff; outline-offset: -2px; }
 .vm-picker { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
 .vm-picker select { background: var(--panel); border: 1px solid #435164; border-radius: 7px; color: var(--text); padding: 9px 30px 9px 12px; max-width: 260px; font: inherit; }
