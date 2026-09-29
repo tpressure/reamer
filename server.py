@@ -740,7 +740,8 @@ class HeartbeatServer:
       button.setAttribute("aria-disabled", "true");
       feedback.textContent = "";
       try {{
-        const response = await fetch(form.action, {{
+        // The stress command's input named "action" shadows form.action.
+        const response = await fetch(form.getAttribute("action"), {{
           method: "POST", body: new URLSearchParams(new FormData(form)),
           headers: {{"X-Requested-With": "fetch"}}, signal: controller.signal,
         }});
