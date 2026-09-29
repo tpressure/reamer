@@ -17,6 +17,7 @@ DEFAULT_HOST = "127.0.0.1"
 STAMP = re.compile(r'cloud-hypervisor:\s+(\S+Z):')
 VM_UUID = re.compile(r'system_uuid:\s*Some\("([0-9a-fA-F-]{36})"\)')
 COMPLETE = re.compile(r'Migration completed after [0-9.]+s with a downtime of ([0-9]+)ms\b')
+PRECOPY = re.compile(r'Precopy(?P<converged> converged)?: iter=(?P<iteration>[0-9]+)\b')
 EVENT = re.compile(r'Event: source = vm event = ([\w-]+)\b')
 LOG_NAME = re.compile(r'(instance-[\w-]+)\.log(?:\.\d+)?$')
 
@@ -35,6 +36,13 @@ class Reporter:
                 vm_uuid TEXT PRIMARY KEY, instance TEXT, active_at TEXT, ended_at TEXT);
             CREATE TABLE IF NOT EXISTS identities (instance TEXT PRIMARY KEY, vm_uuid TEXT);
         ''')
+        if 'iterations' not in {row[1] for row in self.db.execute('PRAGMA table_info(events)')}:
+            # Re-read retained logs once when upgrading, to enrich cached events.
+            with self.db:
+                self.db.execute('ALTER TABLE events ADD COLUMN iterations INTEGER')
+                self.db.execute('DELETE FROM files')
+        self.db.execute('''CREATE TABLE IF NOT EXISTS iteration_state (
+            vm_uuid TEXT PRIMARY KEY, at TEXT, iterations INTEGER)''')
         self.epoch = None
         self.sent = 0
 
@@ -51,9 +59,29 @@ class Reporter:
         except ValueError:
             return vm_uuid
         complete = COMPLETE.search(line)
-        if complete:
-            self.db.execute('INSERT OR IGNORE INTO events VALUES (?, ?, ?)', (vm_uuid, at, int(complete[1])))
         event = EVENT.search(line)
+        precopy = PRECOPY.search(line)
+        if complete:
+            progress = self.db.execute('SELECT at, iterations FROM iteration_state WHERE vm_uuid = ?', (vm_uuid,)).fetchone()
+            iterations = progress[1] if progress and progress[0] <= at else None
+            old = self.db.execute('SELECT iterations FROM events WHERE vm_uuid = ? AND at = ?', (vm_uuid, at)).fetchone()
+            if old is not None and old[0] is None and iterations is not None:
+                # Give enriched events a new rowid so an already-running uploader
+                # sends them again even when backfill spans several scan batches.
+                next_rowid = self.db.execute('SELECT coalesce(max(rowid), 0) + 1 FROM events').fetchone()[0]
+                self.db.execute('UPDATE events SET rowid = ?, iterations = ? WHERE vm_uuid = ? AND at = ?',
+                                (next_rowid, iterations, vm_uuid, at))
+            self.db.execute('INSERT OR IGNORE INTO events VALUES (?, ?, ?, ?)', (vm_uuid, at, int(complete[1]), iterations))
+        reset = complete or (event and event[1] in (
+            'migration-started', 'migration-receive-started', 'migration-receive-finished',
+            'booted', 'deleted', 'shutdown'))
+        if reset or precopy:
+            # Precopy indices start at zero. "converged" reports the next index,
+            # while "Precopy complete" includes the stopped-VM transfer and is ignored.
+            count = None if reset else int(precopy['iteration']) + (0 if precopy['converged'] else 1)
+            self.db.execute('''INSERT INTO iteration_state VALUES (?, ?, ?)
+                ON CONFLICT(vm_uuid) DO UPDATE SET at = excluded.at, iterations = excluded.iterations
+                WHERE iteration_state.at <= excluded.at''', (vm_uuid, at, count))
         active = event and event[1] in ('booted', 'migration-receive-finished')
         ended = complete or (event and event[1] in ('deleted', 'shutdown'))
         if active or ended:
@@ -115,11 +143,11 @@ class Reporter:
             return offset > initial_offset
 
     def upload(self, host, port, node):
-        events = self.db.execute('SELECT rowid, vm_uuid, at, downtime_ms FROM events WHERE rowid > ? ORDER BY rowid LIMIT 256', (self.sent,)).fetchall()
+        events = self.db.execute('SELECT rowid, vm_uuid, at, downtime_ms, iterations FROM events WHERE rowid > ? ORDER BY rowid LIMIT 256', (self.sent,)).fetchall()
         placements = [dict(zip(('vm_uuid', 'instance', 'active_at', 'ended_at'), row)) for row in self.db.execute('SELECT * FROM placements')]
         # Split placements too, to keep every request below the server's size limit.
         for offset in range(0, max(1, len(placements)), 256):
-            payload = {'node': node, 'events': [dict(zip(('vm_uuid', 'at', 'downtime_ms'), row[1:])) for row in events] if offset == 0 else [], 'placements': placements[offset:offset + 256]}
+            payload = {'node': node, 'events': [dict(zip(('vm_uuid', 'at', 'downtime_ms', 'iterations'), row[1:])) for row in events] if offset == 0 else [], 'placements': placements[offset:offset + 256]}
             request = Request(f'http://{host}:{port}/compute-report', data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
             with urlopen(request, timeout=10) as response:
                 reply = json.load(response)

@@ -420,6 +420,7 @@
                     assert "4 migrations" in page
                     assert "Min 58 ms · Avg 81.5 ms · Max 111 ms" in page
                     assert "Last downtime <strong>111 ms</strong>" in page
+                    append_migration_log(client2, 'cloud-hypervisor: 2026-09-26T23:59:59.000000Z: <migration> INFO:test -- Precopy converged: iter=3 curr=1MiB')
                     append_migration_log(client2, 'cloud-hypervisor: 2026-09-27T00:00:00.000000Z: <migration> INFO:test -- Migration completed after 0.3s with a downtime of 40ms (goal was 300ms)')
                     append_migration_log(client1, 'cloud-hypervisor: 2026-09-27T00:00:01.000000Z: <vmm> INFO:test -- Event: source = vm event = migration-receive-finished')
                     server.wait_until_succeeds("curl --fail --silent http://127.0.0.1:2222/status | grep -q 'Last downtime <strong>40 ms</strong>'")
@@ -430,6 +431,7 @@
                     statistics = json.loads(server.succeed("curl --fail --silent 'http://127.0.0.1:2222/statistics?vm=37914fc2-9f9a-4979-b3ea-641e1be1d233'"))
                     assert statistics["selected"] == "37914fc2-9f9a-4979-b3ea-641e1be1d233"
                     assert statistics["events"][-1]["downtime_ms"] == 40
+                    assert [event["iterations"] for event in statistics["events"]] == [1, 1, 1, 1, 3]
                     guest_stats = next(vm for vm in statistics["vms"] if vm["id"] == client_uuids["client1"])
                     assert guest_stats["migration"]["count"] == 5
                     assert guest_stats["history"]
@@ -468,6 +470,8 @@
                     assert {vm["name"] for vm in selected["vms"]} == set(client_uuids.values())
                     assert all(event["vm_uuid"] == identity for event in selected["events"])
                     assert [event["downtime_ms"] for event in selected["events"]] == values
+                    expected_iterations = [1, 1, 1, 1, 3] if name == "client1" else [index + i for i in range(len(values))]
+                    assert [event["iterations"] for event in selected["events"]] == expected_iterations
 
             if ${toString numClientVms} >= 2:
                 with subtest("Fleet statistics keep multiple VM migration histories separate"):
@@ -484,6 +488,7 @@
                             for event_index, downtime in enumerate(values):
                                 # Alternating senders model back-and-forth migrations.
                                 if event_index % 2 == node_index:
+                                    lines.append(f'cloud-hypervisor: 2026-09-27T{event_index + 2:02}:00:00Z: <migration> INFO:test -- Precopy converged: iter={index + event_index} curr=1MiB')
                                     lines.append(f'cloud-hypervisor: 2026-09-27T{event_index + 2:02}:00:{index:02}Z: <migration> INFO:test -- Migration completed after 0.3s with a downtime of {downtime}ms (goal was 300ms)')
                             if node_index == index % 2:
                                 lines.append('cloud-hypervisor: 2026-09-27T08:00:00Z: <vmm> INFO:test -- Event: source = vm event = migration-receive-finished')

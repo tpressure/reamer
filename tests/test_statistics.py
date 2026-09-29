@@ -19,7 +19,7 @@ class StatisticsTests(unittest.TestCase):
 
     def report(self, identity=VM, count=3):
         self.server.migrations.ingest({'node': 'compute-a', 'events': [
-            {'vm_uuid': identity, 'at': f'2026-09-28T{index // 60:02}:{index % 60:02}:00Z', 'downtime_ms': index + 10}
+            {'vm_uuid': identity, 'at': f'2026-09-28T{index // 60:02}:{index % 60:02}:00Z', 'downtime_ms': index + 10, 'iterations': index % 5 + 1}
             for index in range(count)], 'placements': [
                 {'vm_uuid': identity, 'instance': 'instance-64', 'active_at': '2026-09-28T00:00:00Z', 'ended_at': None}]})
 
@@ -31,7 +31,7 @@ class StatisticsTests(unittest.TestCase):
         self.assertIn('id="overview-tab" role="tab" aria-selected="true"', page)
         self.assertIn('id="details-panel" role="tabpanel" aria-labelledby="details-tab" hidden', page)
         self.assertIn('id="statistic-panel" role="tabpanel" aria-labelledby="statistic-tab" hidden', page)
-        self.assertEqual(page.count('data-metric='), 3)
+        self.assertEqual(page.count('data-metric='), 4)
 
     def test_fleet_squares_keep_positions_as_health_changes(self):
         for name in ['c-red', 'a-green', 'b-<yellow>']:
@@ -56,6 +56,7 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(len(data['events']), 200)
         self.assertEqual(data['events'][0]['downtime_ms'], 60)
         self.assertEqual(data['events'][-1]['downtime_ms'], 259)
+        self.assertEqual(data['events'][-1]['iterations'], 5)
         self.assertEqual(data['events'], sorted(data['events'], key=lambda event: event['at']))
 
     def test_selected_vm_history_keeps_all_vm_overview(self):

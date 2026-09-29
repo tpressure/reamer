@@ -689,6 +689,7 @@ class HeartbeatServer:
       </header>
       <div class="metric-picker" role="group" aria-label="Metric to visualize">
         <button type="button" data-metric="migration" aria-pressed="true"><span>Migration downtime</span><small>Completed migrations</small></button>
+        <button type="button" data-metric="iterations" aria-pressed="false"><span>Migration iterations</span><small>Before switchover</small></button>
         <button type="button" data-metric="cpu_percent" aria-pressed="false"><span>CPU usage</span><small>Last 60 seconds</small></button>
         <button type="button" data-metric="memory_percent" aria-pressed="false"><span>Memory usage</span><small>Last 60 seconds</small></button>
       </div>

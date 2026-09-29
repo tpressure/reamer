@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from http.server import ThreadingHTTPServer
@@ -47,7 +48,7 @@ class MigrationTests(unittest.TestCase):
 
     def report(self, node='compute-a'):
         return {'node': node,
-                'events': [dict(zip(('vm_uuid', 'at', 'downtime_ms'), row)) for row in self.reporter.db.execute('SELECT * FROM events')],
+                'events': [dict(zip(('vm_uuid', 'at', 'downtime_ms', 'iterations'), row)) for row in self.reporter.db.execute('SELECT * FROM events')],
                 'placements': [dict(zip(('vm_uuid', 'instance', 'active_at', 'ended_at'), row)) for row in self.reporter.db.execute('SELECT * FROM placements')]}
 
     def test_supplied_log_counts_only_sender_completions(self):
@@ -58,6 +59,75 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual([result[key] for key in ('count', 'min_ms', 'avg_ms', 'max_ms', 'last_ms')], [4, 58, 81.5, 111, 111])
         self.assertIsNone(result['node'])  # Final shutdown in supplied log.
         self.assertFalse(self.reporter.scan())
+
+    def test_iterations_exclude_switchover_and_survive_reporter_restart(self):
+        self.path.write_text(identity() + event('2026-09-26T00:00:00', 'migration-started')
+                             + line('2026-09-26T00:00:01', 'Precopy: iter=0 curr=1024MiB')
+                             + line('2026-09-26T00:00:02', 'Precopy: iter=1 curr=100MiB'))
+        self.reporter.scan()
+        restarted = Reporter(self.logs, self.root / 'reporter.sqlite')
+        self.addCleanup(restarted.db.close)
+        with self.path.open('a') as stream:
+            stream.write(line('2026-09-26T00:00:03', 'Precopy converged: iter=2 curr=1MiB')
+                         + event('2026-09-26T00:00:04', 'pausing')
+                         + line('2026-09-26T00:00:05', 'Precopy complete: iter=3 curr=1MiB')
+                         + completed('2026-09-26T00:00:06'))
+        restarted.scan()
+        self.store.ingest(self.report())
+        self.assertEqual(self.store.history()[0]['iterations'], 2)
+        # Another migration without iteration logs must remain unknown.
+        with self.path.open('a') as stream:
+            stream.write(completed('2026-09-27T00:00:00'))
+        restarted.scan()
+        self.store.ingest(self.report())
+        self.assertIsNone(self.store.history()[-1]['iterations'])
+
+    def test_iterations_reset_after_failed_attempt_and_across_rotation(self):
+        self.path.write_text(identity() + line('2026-09-26T00:00:01', 'Precopy: iter=9 curr=1MiB')
+                             + event('2026-09-26T00:00:02', 'migration-started')
+                             + line('2026-09-26T00:00:03', 'Precopy: iter=0 curr=1024MiB'))
+        self.reporter.scan()
+        self.path.rename(self.logs / 'instance-00000064.log.1')
+        self.path.write_text(line('2026-09-26T00:00:04', 'Precopy complete: iter=2 curr=1MiB')
+                             + completed('2026-09-26T00:00:05'))
+        self.reporter.scan()
+        self.store.ingest(self.report())
+        self.assertEqual(self.store.history()[0]['iterations'], 1)
+
+    def test_iteration_validation_and_enrichment_preserve_downtime(self):
+        record = {'vm_uuid': VM, 'at': '2026-09-23T00:00:00Z', 'downtime_ms': 12}
+        report = {'node': 'n', 'events': [record], 'placements': []}
+        self.store.ingest(report)
+        self.assertIsNone(self.store.history()[0]['iterations'])
+        for value in [-1, True, 1.5, '2', 2**54]:
+            with self.assertRaises(ValueError):
+                self.store.ingest(dict(report, events=[dict(record, iterations=value)]))
+        self.store.ingest(dict(report, events=[dict(record, iterations=0)]))
+        self.store.ingest(report)  # An older reporter must not erase new data.
+        self.assertEqual(self.store.history()[0]['iterations'], 0)
+        self.assertEqual(self.store.summary(VM)['count'], 1)
+        self.assertEqual(self.store.summary(VM)['last_ms'], 12)
+
+    def test_legacy_databases_upgrade_and_backfill_retained_logs(self):
+        reporter_db, server_db = self.root / 'old-reporter.sqlite', self.root / 'old-server.sqlite'
+        at = '2026-09-26T00:00:00.000000+00:00'
+        for path, table in [(reporter_db, 'events'), (server_db, 'migrations')]:
+            with sqlite3.connect(path) as db:
+                db.execute(f'CREATE TABLE {table} (vm_uuid TEXT, at TEXT, downtime_ms INTEGER, UNIQUE(vm_uuid, at))')
+                db.execute(f'INSERT INTO {table} VALUES (?, ?, ?)', (VM, at, 42))
+        self.path.write_text(identity() + line('2026-09-25T23:59:59', 'Precopy converged: iter=4 curr=1MiB') + completed())
+        upgraded = Reporter(self.logs, reporter_db)
+        store = MigrationStore(server_db)
+        self.addCleanup(upgraded.db.close)
+        self.addCleanup(store.db.close)
+        self.assertIsNone(store.history()[0]['iterations'])
+        upgraded.sent = 1  # Simulate an upload before the scan reached this event.
+        upgraded.scan()
+        row = upgraded.db.execute('SELECT rowid, vm_uuid, at, downtime_ms, iterations FROM events').fetchone()
+        self.assertGreater(row[0], upgraded.sent)
+        store.ingest({'node': 'n', 'events': [dict(zip(('vm_uuid', 'at', 'downtime_ms', 'iterations'), row[1:]))], 'placements': []})
+        self.assertEqual(store.history()[0]['iterations'], 4)
+        self.assertEqual(store.summary(VM)['count'], 1)
 
     def test_two_nodes_late_reports_and_deduplication(self):
         self.path.write_text(identity() + event('2026-09-23T10:00:01', 'booted') + completed())
@@ -178,11 +248,12 @@ class MigrationTests(unittest.TestCase):
         httpd = servers[0]
         self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
-        self.path.write_text(identity() + completed())
+        self.path.write_text(identity() + line('2026-09-25T00:00:00', 'Precopy converged: iter=3 curr=1MiB') + completed())
         self.reporter.scan()
         for _ in range(3):
             self.reporter.upload('127.0.0.1', httpd.server_port, 'compute-a')
         self.assertEqual(server.migrations.summary(VM)['count'], 1)
+        self.assertEqual(server.statistics_data()['events'][0]['iterations'], 3)
         server.migrations.db.execute('DELETE FROM migrations')
         server.migrations.db.commit()
         server.migrations.epoch = 'new-server'

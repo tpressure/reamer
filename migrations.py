@@ -44,6 +44,10 @@ class MigrationStore:
             CREATE INDEX IF NOT EXISTS migrations_time ON migrations(at DESC);
         ''')
 
+        if 'iterations' not in {row[1] for row in self.db.execute('PRAGMA table_info(migrations)')}:
+            with self.db:
+                self.db.execute('ALTER TABLE migrations ADD COLUMN iterations INTEGER')
+
     def identities(self):
         with self.lock:
             return [row[0] for row in self.db.execute('SELECT vm_uuid FROM migrations UNION SELECT vm_uuid FROM placements')]
@@ -51,10 +55,10 @@ class MigrationStore:
     def history(self, identity=None, limit=200):
         with self.lock:
             if identity is None:
-                rows = self.db.execute('SELECT vm_uuid, at, downtime_ms FROM migrations ORDER BY at DESC, vm_uuid LIMIT ?', (limit,)).fetchall()
+                rows = self.db.execute('SELECT vm_uuid, at, downtime_ms, iterations FROM migrations ORDER BY at DESC, vm_uuid LIMIT ?', (limit,)).fetchall()
             else:
-                rows = self.db.execute('SELECT vm_uuid, at, downtime_ms FROM migrations WHERE vm_uuid = ? ORDER BY at DESC LIMIT ?', (identity, limit)).fetchall()
-        return [dict(zip(('vm_uuid', 'at', 'downtime_ms'), row)) for row in reversed(rows)]
+                rows = self.db.execute('SELECT vm_uuid, at, downtime_ms, iterations FROM migrations WHERE vm_uuid = ? ORDER BY at DESC LIMIT ?', (identity, limit)).fetchall()
+        return [dict(zip(('vm_uuid', 'at', 'downtime_ms', 'iterations'), row)) for row in reversed(rows)]
 
     def ingest(self, report):
         if not isinstance(report, dict):
@@ -73,7 +77,10 @@ class MigrationStore:
             value = event.get('downtime_ms')
             if type(value) is not int or not 0 <= value <= 2**53:
                 raise ValueError('Invalid downtime')
-            clean_events.append((identity, timestamp(event.get('at')), value))
+            iterations = event.get('iterations')
+            if iterations is not None and (type(iterations) is not int or not 0 <= iterations <= 2**53):
+                raise ValueError('Invalid migration iterations')
+            clean_events.append((identity, timestamp(event.get('at')), value, iterations))
         for placement in placements:
             identity = vm_identity(placement.get('vm_uuid')) if isinstance(placement, dict) else None
             if not identity:
@@ -85,7 +92,9 @@ class MigrationStore:
             ended = timestamp(placement['ended_at']) if placement.get('ended_at') is not None else None
             clean_placements.append((identity, node, instance, active, ended))
         with self.lock, self.db:
-            self.db.executemany('INSERT OR IGNORE INTO migrations VALUES (?, ?, ?)', clean_events)
+            self.db.executemany('''INSERT INTO migrations VALUES (?, ?, ?, ?)
+                ON CONFLICT(vm_uuid, at) DO UPDATE SET iterations = excluded.iterations
+                WHERE migrations.iterations IS NULL AND excluded.iterations IS NOT NULL''', clean_events)
             for identity, source, instance, active, ended in clean_placements:
                 self.db.execute('INSERT OR IGNORE INTO placements VALUES (?, ?, ?, NULL, NULL)', (identity, source, instance))
                 for column, value in (('active_at', active), ('ended_at', ended)):

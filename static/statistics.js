@@ -210,7 +210,7 @@
   });
   byId('migration-time-reset').addEventListener('click', () => { timeWindow = null; renderChart(); });
   function renderTimeRange(points) {
-    const visible = metric === 'migration' && points.length > 0;
+    const visible = (metric === 'migration' || metric === 'iterations') && points.length > 0;
     byId('migration-time-range').hidden = !visible;
     if (!visible) return null;
     rangeDomain = rangeDrag?.domain || [points[0].at, points.at(-1).at];
@@ -249,27 +249,29 @@
   function renderChart() {
     const chosen = data.vms.find(vm => vm.id === selected);
     const vms = chosen ? [chosen] : data.vms;
-    const migration = metric === 'migration';
+    const iterations = metric === 'iterations';
+    const migration = metric === 'migration' || iterations;
+    const format = iterations ? value => `${number(value)} iterations` : duration;
     const names = new Map(data.vms.map(vm => [vm.vm_uuid, vm.name]));
-    const available = migration ? data.events.map(event => ({at: Date.parse(event.at) / 1000, value: event.downtime_ms, name: names.get(event.vm_uuid) || event.vm_uuid, key: event.vm_uuid + event.at})) : usagePoints(vms);
+    const available = migration ? data.events.filter(event => !iterations || event.iterations != null).map(event => ({at: Date.parse(event.at) / 1000, value: iterations ? event.iterations : event.downtime_ms, name: names.get(event.vm_uuid) || event.vm_uuid, key: event.vm_uuid + event.at})) : usagePoints(vms);
     const bounds = renderTimeRange(available);
     const points = migration && bounds ? available.filter(point => point.at >= bounds[0] && point.at <= bounds[1]) : available;
-    const label = migration ? 'Migration downtime' : metric === 'cpu_percent' ? 'CPU usage' : 'Memory usage';
+    const label = iterations ? 'Migration iterations' : migration ? 'Migration downtime' : metric === 'cpu_percent' ? 'CPU usage' : 'Memory usage';
     const total = vms.reduce((sum, vm) => sum + (vm.migration?.count || 0), 0);
     setText(byId('statistics-chart-title'), label + ' over time');
     const scope = chosen ? chosen.name : 'All VMs';
     setText(byId('statistics-chart-note'), migration
-      ? `${scope} · ${timeWindow ? `${points.length} in selected interval · ` : ''}${available.length < total ? `latest ${available.length} of ${total}` : available.length} completed migrations${timeWindow ? ' available' : ' · each point is one migration'}`
+      ? `${scope} · ${timeWindow ? `${points.length} in selected interval · ` : ''}${iterations ? `${available.length} migrations with iteration counts · before switchover` : `${available.length < total ? `latest ${available.length} of ${total}` : available.length} completed migrations`}${timeWindow ? ' available' : ' · each point is one migration'}${iterations && available.length < data.events.length ? ` · ${data.events.length - available.length} without counts` : ''}`
       : `${scope} · last 60 seconds${chosen ? '' : ' · average line, min–max band'}`);
-    setText(byId('statistics-reading'), points.length ? (migration ? duration(points.at(-1).value) : percent(points.at(-1).value)) : '—');
+    setText(byId('statistics-reading'), points.length ? (migration ? format(points.at(-1).value) : percent(points.at(-1).value)) : '—');
     byId('statistics-reading').title = migration ? 'Most recent migration in this chart' : 'Most recent sample in this chart';
     const previousPoint = chart.querySelector(':focus')?.dataset.key;
     chart.replaceChildren();
     setText(byId('statistics-point'), 'Hover or focus a point to inspect it.');
     if (!points.length) {
       const empty = document.createElement('div'); empty.className = 'empty-state';
-      const heading = document.createElement('strong'); heading.textContent = migration ? (available.length ? 'No migrations in this interval' : 'No completed migrations yet') : 'No recent usage samples';
-      const hint = document.createElement('span'); hint.textContent = migration ? (available.length ? 'Expand the interval or choose Full range to see more migrations.' : 'Downtime history appears when compute nodes report completed migrations.') : 'Usage appears when guest clients send heartbeats. Only the last 60 seconds are retained.';
+      const heading = document.createElement('strong'); heading.textContent = migration ? (available.length ? 'No migrations in this interval' : iterations ? 'No migration iteration counts yet' : 'No completed migrations yet') : 'No recent usage samples';
+      const hint = document.createElement('span'); hint.textContent = migration ? (available.length ? 'Expand the interval or choose Full range to see more migrations.' : iterations ? 'Update the compute-node reporter to collect precopy iterations from migration logs.' : 'Downtime history appears when compute nodes report completed migrations.') : 'Usage appears when guest clients send heartbeats. Only the last 60 seconds are retained.';
       empty.append(heading, hint); chart.append(empty); setText(byId('statistics-point'), ''); return;
     }
     const width = Math.max(280, chart.clientWidth), height = 245;
@@ -283,10 +285,11 @@
     const x = at => left + (at - start) / (end - start) * (right - left);
     const y = value => bottom - value / ymax * (bottom - top);
     const svg = svgElement('svg', {viewBox: `0 0 ${width} ${height}`, role: 'group', 'aria-label': `${label}, ${scope}`, class: metric === 'memory_percent' ? 'memory' : ''});
-    for (let i = 0; i <= 4; i++) {
-      const value = ymax * i / 4;
+    const yTicks = iterations ? Math.min(4, ymax) : 4;
+    for (let i = 0; i <= yTicks; i++) {
+      const value = iterations ? Math.round(ymax * i / yTicks) : ymax * i / yTicks;
       svg.append(svgElement('line', {x1: left, y1: y(value), x2: right, y2: y(value), class: 'chart-grid'}));
-      svg.append(svgElement('text', {x: left - 9, y: y(value) + 4, 'text-anchor': 'end'}, number(value) + (migration ? ' ms' : '%')));
+      svg.append(svgElement('text', {x: left - 9, y: y(value) + 4, 'text-anchor': 'end'}, number(value) + (iterations ? '' : migration ? ' ms' : '%')));
     }
     const ticks = width < 500 ? 2 : 4;
     for (let i = 0; i <= ticks; i++) {
@@ -308,7 +311,7 @@
     }
     points.forEach(point => {
       if (migration) svg.append(svgElement('line', {x1: x(point.at), x2: x(point.at), y1: bottom, y2: y(point.value), class: 'plot-stem'}));
-      const details = migration ? `${point.name} · ${dateTime(point.at * 1000)} · downtime ${duration(point.value)}` : `${dateTime(point.at * 1000)} · ${label} ${percent(point.value)}${chosen ? '' : ` · ${point.count} VMs · range ${percent(point.min)}–${percent(point.max)}`}`;
+      const details = migration ? `${point.name} · ${dateTime(point.at * 1000)} · ${iterations ? format(point.value) + ' before switchover' : 'downtime ' + duration(point.value)}` : `${dateTime(point.at * 1000)} · ${label} ${percent(point.value)}${chosen ? '' : ` · ${point.count} VMs · range ${percent(point.min)}–${percent(point.max)}`}`;
       const circle = svgElement('circle', {cx: x(point.at), cy: y(point.value), r: migration ? 4.5 : 3, class: 'plot-point', tabindex: 0, role: 'button', 'aria-label': details, 'data-key': point.key});
       circle.append(svgElement('title', {}, details));
       ['mouseenter', 'focus', 'click'].forEach(name => circle.addEventListener(name, () => setText(byId('statistics-point'), details)));
